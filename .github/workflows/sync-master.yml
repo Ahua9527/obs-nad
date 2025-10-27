@@ -1,0 +1,81 @@
+name: Sync Upstream Master
+
+on:
+  schedule:
+    - cron: '0 8 * * *' # Runs every day at 8:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Sync with upstream master
+    runs-on: ubuntu-24.04
+    env:
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'master' }}
+      UPSTREAM_REPO: https://github.com/obsproject/obs-studio.git
+      PUSH_TOKEN: ${{ secrets.NAD_AUTOMATION_TOKEN || secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ env.PUSH_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "NAD Sync Bot"
+          git config user.email "noreply@github.com"
+          git remote set-url origin "https://x-access-token:${{ env.PUSH_TOKEN }}@github.com/${{ github.repository }}.git"
+
+      - name: Merge Upstream Master
+        run: |
+          set -euo pipefail
+
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream ${{ env.UPSTREAM_REPO }}
+          else
+            git remote add upstream ${{ env.UPSTREAM_REPO }}
+          fi
+
+          git fetch upstream --prune master
+          git fetch origin --prune ${{ env.DEFAULT_BRANCH }}
+
+          git checkout "${{ env.DEFAULT_BRANCH }}"
+          git reset --hard "origin/${{ env.DEFAULT_BRANCH }}"
+
+          echo "Merging upstream/master with protected files..."
+          
+          # Configure merge strategy to prefer our version for specific files
+          git config merge.ours.driver true
+          
+          # Create temporary .gitattributes
+          cat > .gitattributes << EOF
+          README.md merge=ours
+          .github/workflows/ merge=ours
+          EOF
+          
+          git add .gitattributes
+          
+          # Execute merge
+          git merge --no-ff --no-edit "upstream/master" || {
+            echo "Merge conflict detected, resolving with protected files..."
+            git checkout --ours README.md 2>/dev/null || true
+            git checkout --ours .github/workflows/ 2>/dev/null || true
+            git add .
+            git commit --no-edit || true
+          }
+          
+          # Cleanup temporary .gitattributes
+          rm -f .gitattributes
+          git reset HEAD .gitattributes 2>/dev/null || true
+
+      - name: Push Changes
+        run: |
+          if git diff --quiet HEAD "origin/${{ env.DEFAULT_BRANCH }}"; then
+            echo "No changes to push."
+          else
+            echo "Pushing changes to origin/${{ env.DEFAULT_BRANCH }}..."
+            git push origin "${{ env.DEFAULT_BRANCH }}"
+          fi

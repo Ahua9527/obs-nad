@@ -1,0 +1,110 @@
+name: Create Release
+
+on:
+  workflow_run:
+    workflows: ["Sync and Build"]
+    types:
+      - completed
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Draft Release
+    runs-on: ubuntu-24.04
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - name: Download Version Info
+        uses: actions/download-artifact@v4
+        with:
+          name: version-info
+          path: ./
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Load Version Info
+        id: run_data
+        run: |
+          cat version-info.json
+          echo "nad_version=$(jq -r .nad_version version-info.json)" >> $GITHUB_OUTPUT
+          echo "upstream_version=$(jq -r .upstream_version version-info.json)" >> $GITHUB_OUTPUT
+          echo "commit_sha=$(jq -r .commit_sha version-info.json)" >> $GITHUB_OUTPUT
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.run_data.outputs.commit_sha }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+          path: artifacts/
+
+      - name: Get Upstream Release Info
+        id: upstream_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          is_prerelease=$(gh api repos/obsproject/obs-studio/releases/tags/${{ steps.run_data.outputs.upstream_version }} --jq .prerelease)
+          echo "is_prerelease=${is_prerelease}" >> $GITHUB_OUTPUT
+
+      - name: Rename Artifacts
+        id: rename
+        run: |
+          set -euo pipefail
+          UPSTREAM_VERSION="${{ steps.run_data.outputs.upstream_version }}"
+          
+          find artifacts -type f -name "*.dmg" -print0 | while IFS= read -r -d $'\0' file; do
+            if [[ "$file" == *"arm64-no-aja"* ]]; then
+              mv "$file" "OBS-Studio-${UPSTREAM_VERSION}-no-aja-macOS-Apple.dmg"
+            elif [[ "$file" == *"x86_64-no-aja"* ]]; then
+              mv "$file" "OBS-Studio-${UPSTREAM_VERSION}-no-aja-macOS-Intel.dmg"
+            elif [[ "$file" == *"arm64-no-decklink"* ]]; then
+              mv "$file" "OBS-Studio-${UPSTREAM_VERSION}-no-decklink-macOS-Apple.dmg"
+            elif [[ "$file" == *"x86_64-no-decklink"* ]]; then
+              mv "$file" "OBS-Studio-${UPSTREAM_VERSION}-no-decklink-macOS-Intel.dmg"
+            fi
+          done
+          ls -R
+
+      - name: Generate Release Body and Checksums
+        run: |
+          UPSTREAM_VERSION="${{ steps.run_data.outputs.upstream_version }}"
+
+          {
+            echo "See upstream release notes for the changelog:"
+            echo "https://github.com/obsproject/obs-studio/releases/tag/v${UPSTREAM_VERSION}"
+            echo ""
+            echo "**Note: This is an unsigned build.**"
+            echo ""
+            echo "> To run this application on macOS, you may need to right-click (or Ctrl-click) the OBS icon inside the DMG and select \"Open\"."
+            echo ""
+            echo "### Checksums"
+            echo '```'
+          } > CHECKSUMS.txt
+
+          find . -type f -name "OBS-Studio-*.dmg" -exec sha256sum {} + >> CHECKSUMS.txt
+          echo '```' >> CHECKSUMS.txt
+
+      - name: Create and Push Tag
+        run: |
+          set -euo pipefail
+          NAD_VERSION="${{ steps.run_data.outputs.nad_version }}"
+          git config user.name "NAD Sync Bot"
+          git config user.email "noreply@github.com"
+          git tag -a "${NAD_VERSION}" -m "Release ${NAD_VERSION}" "${{ steps.run_data.outputs.commit_sha }}"
+          git push origin "${NAD_VERSION}"
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.run_data.outputs.nad_version }}
+          name: OBS Studio ${{ steps.run_data.outputs.nad_version }}
+          body_path: CHECKSUMS.txt
+          draft: false
+          prerelease: ${{ steps.upstream_release.outputs.is_prerelease }}
+          files: |
+            OBS-Studio-*.dmg

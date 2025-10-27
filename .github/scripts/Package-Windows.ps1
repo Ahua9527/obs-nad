@@ -51,10 +51,12 @@ function Package {
     $CommitHash = $($Tokens[-1]).SubString(1)
     $CommitDistance = $Tokens[-2]
 
+    $ArtifactPrefix = 'obs-studio-no-aja'
+
     if ( $CommitDistance -gt 0 ) {
-        $OutputName = "obs-studio-${CommitVersion}-${CommitHash}"
+        $OutputName = "${ArtifactPrefix}-${CommitVersion}-${CommitHash}"
     } else {
-        $OutputName = "obs-studio-${CommitVersion}"
+        $OutputName = "${ArtifactPrefix}-${CommitVersion}"
     }
 
     $CpackArgs = @(

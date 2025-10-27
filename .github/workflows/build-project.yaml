@@ -3,7 +3,7 @@ on:
   workflow_call:
 jobs:
   check-event:
-    name: Event Data 🔎
+    name: Event Data
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -14,53 +14,163 @@ jobs:
       notarize: ${{ steps.setup.outputs.notarize }}
       config: ${{ steps.setup.outputs.config }}
       commitHash: ${{ steps.setup.outputs.commitHash }}
+      isUpstreamRelease: ${{ steps.setup.outputs.isUpstreamRelease }}
+      upstreamVersion: ${{ steps.setup.outputs.upstreamVersion }}
+      nadVersion: ${{ steps.setup.outputs.nadVersion }}
+      versionPayload: ${{ steps.setup.outputs.versionPayload }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Check Event Data ☑️
+      - name: Check Event Data
         id: setup
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          : Check Event Data ☑️
-          if [[ "${RUNNER_DEBUG}" ]]; then set -x; fi
+          set -euo pipefail
+          if [[ "${RUNNER_DEBUG:-}" ]]; then set -x; fi
+
+          emit_output() {
+            printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"
+          }
+
+          set_flag() {
+            local key=$1 value=$2
+            for idx in "${!config_data[@]}"; do
+              if [[ "${config_data[$idx]}" == "${key}:"* ]]; then
+                config_data[$idx]="${key}:${value}"
+                return
+              fi
+            done
+            config_data+=("${key}:${value}")
+          }
+
+          mapping_file="${GITHUB_WORKSPACE}/version-mapping.json"
+          default_nad_version="0.0.0-no-aja"
+          if [[ -r "${mapping_file}" ]]; then
+            extracted=$(jq -re '
+              [
+                .last_sync.nad_version,
+                (.version_mappings // {} | to_entries | sort_by(.key) | reverse | (.[0].value // empty))
+              ]
+              | map(select(. != null and . != ""))
+              | (.[0] // empty)
+            ' "${mapping_file}" 2>/dev/null || true)
+            if [[ -n "${extracted}" ]]; then
+              default_nad_version="${extracted}"
+            fi
+          fi
+          default_upstream_version="${default_nad_version%-no-aja}"
+
+          is_upstream_release=false
+          upstream_version=""
+          nad_version=""
+
+          config_data=('codesign:false' 'notarize:false' 'package:false' 'config:RelWithDebInfo')
 
           case "${GITHUB_EVENT_NAME}" in
             pull_request)
-              config_data=('codesign:false' 'notarize:false' 'package:false' 'config:RelWithDebInfo')
-              if gh pr view ${{ github.event.number }} --json labels \
+              if gh pr view "${{ github.event.number }}" --json labels \
                 | jq -e -r '.labels[] | select(.name == "Seeking Testers")' > /dev/null; then
-                config_data[0]='codesign:true'
-                config_data[2]='package:true'
+                set_flag codesign true
+                set_flag package true
               fi
               ;;
             push)
-              config_data=('codesign:true' 'notarize:false' 'package:true' 'config:RelWithDebInfo')
-              if [[ ${GITHUB_REF_NAME} =~ [0-9]+.[0-9]+.[0-9]+(-(rc|beta).+)? ]]; then
-                config_data[1]='notarize:true'
-                config_data[3]='config:Release'
+              set_flag codesign true
+              set_flag package true
+
+              latest_author=$(git log -1 --pretty='%an <%ae>')
+              latest_message=$(git log -1 --pretty='%B')
+              if [[ "${latest_author}" == OBS\ NAD\ Sync\ Bot* ]] && grep -q "Upstream version:" <<< "${latest_message}"; then
+                upstream_version=$(grep -Eo 'Upstream version:[[:space:]]*[^[:space:]]+' <<< "${latest_message}" | sed -E 's/Upstream version:[[:space:]]*//' | head -1)
+                if [[ -n "${upstream_version}" ]]; then
+                  is_upstream_release=true
+                  nad_version="${upstream_version}-no-aja"
+                  echo "Detected upstream sync commit for ${upstream_version}"
+                fi
+              elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+                tag_name="${GITHUB_REF_NAME}"
+                base_tag="${tag_name#v}"
+                suffix=""
+                if [[ "${base_tag}" == *"-no-aja" ]]; then
+                  suffix="-no-aja"
+                  base_tag="${base_tag%-no-aja}"
+                fi
+                if [[ "${base_tag}" =~ ^[0-9]+(\.[0-9]+){1,2}(-(rc|beta).+)?$ ]]; then
+                  is_upstream_release=true
+                  upstream_version="${base_tag}"
+                  if [[ -n "${suffix}" ]]; then
+                    nad_version="${base_tag}${suffix}"
+                  else
+                    nad_version="${base_tag}-no-aja"
+                  fi
+                  set_flag notarize true
+                  echo "Detected tag release: ${nad_version}"
+                fi
               fi
               ;;
             workflow_dispatch)
-              config_data=('codesign:true' 'notarize:false' 'package:false' 'config:RelWithDebInfo')
+              manual_version="${{ github.event.inputs.version || '' }}"
+              set_flag codesign true
+              if [[ -n "${manual_version}" ]]; then
+                upstream_version="${manual_version#v}"
+                nad_version="${upstream_version}-no-aja"
+                set_flag package true
+                echo "Manual sync with version: ${nad_version}"
+              fi
+              ;;
+            repository_dispatch)
+              set_flag codesign true
+              set_flag package true
+              payload_version="${{ github.event.client_payload.version || '' }}"
+              payload_nad="${{ github.event.client_payload.nad_version || '' }}"
+              payload_release="${{ github.event.client_payload.is_upstream_release || 'false' }}"
+              if [[ -n "${payload_version}" ]]; then
+                upstream_version="${payload_version#v}"
+              fi
+              if [[ -n "${payload_nad}" ]]; then
+                nad_version="${payload_nad}"
+              elif [[ -n "${upstream_version}" ]]; then
+                nad_version="${upstream_version}-no-aja"
+              fi
+              if [[ "${payload_release}" == "true" ]]; then
+                is_upstream_release=true
+                set_flag notarize true
+              fi
               ;;
             schedule)
-              config_data=('codesign:true' 'notarize:false' 'package:true' 'config:RelWithDebInfo')
+              set_flag codesign true
+              set_flag package true
               ;;
-            *) ;;
+            *)
+              ;;
           esac
+
+          if [[ -z "${nad_version}" ]]; then
+            nad_version="${default_nad_version}"
+          fi
+          if [[ -z "${upstream_version}" ]]; then
+            upstream_version="${default_upstream_version}"
+          fi
+
+          emit_output isUpstreamRelease "${is_upstream_release}"
+          emit_output upstreamVersion "${upstream_version}"
+          emit_output nadVersion "${nad_version}"
 
           for config in "${config_data[@]}"; do
             IFS=':' read -r key value <<< "${config}"
-            echo "${key}=${value}" >> $GITHUB_OUTPUT
+            emit_output "${key}" "${value}"
           done
-          echo "commitHash=${GITHUB_SHA:0:9}" >> $GITHUB_OUTPUT
+          emit_output commitHash "${GITHUB_SHA:0:9}"
+
+          emit_output versionPayload "$(jq -nc --arg upstream "${upstream_version}" --arg nad "${nad_version}" --arg release "${is_upstream_release}" '{upstreamVersion:$upstream,nadVersion:$nad,isUpstreamRelease:($release=="true")}')"
 
   macos-build:
-    name: macOS 🍏
+    name: macOS
     runs-on: macos-15
     needs: check-event
+    # NAD: 始终构建 macOS，包括标签推送时
     strategy:
       fail-fast: false
       matrix:
@@ -74,10 +184,10 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Set Up Environment 🔧
+      - name: Set Up Environment
         id: setup
         run: |
-          : Set Up Environment 🔧
+          : Set Up Environment
           if (( ${+RUNNER_DEBUG} )) setopt XTRACE
 
           print '::group::Enable Xcode 16.4'
@@ -105,20 +215,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-ccache-${{ matrix.target }}-
 
-      - name: Set Up Code Signing 🔑
-        uses: ./.github/actions/setup-macos-codesigning
-        if: fromJSON(needs.check-event.outputs.codesign)
-        id: codesign
-        with:
-          codesignIdentity: ${{ secrets.MACOS_SIGNING_IDENTITY }}
-          codesignCertificate: ${{ secrets.MACOS_SIGNING_CERT }}
-          certificatePassword: ${{ secrets.MACOS_SIGNING_CERT_PASSWORD }}
-          keychainPassword: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
-          provisioningProfile: ${{ secrets.MACOS_SIGNING_PROVISIONING_PROFILE }}
-          notarizationUser: ${{ secrets.MACOS_NOTARIZATION_USERNAME }}
-          notarizationPassword: ${{ secrets.MACOS_NOTARIZATION_PASSWORD }}
+      # NAD: 跳过代码签名设置（无证书）
+      # - name: Set Up Code Signing 🔑
+      #   uses: ./.github/actions/setup-macos-codesigning
+      #   if: false
+      #   id: codesign
 
-      - name: Build OBS Studio 🧱
+      - name: Build OBS Studio
         uses: ./.github/actions/build-obs
         env:
           TWITCH_CLIENTID: ${{ secrets.TWITCH_CLIENT_ID }}
@@ -132,30 +235,33 @@ jobs:
         with:
           target: ${{ matrix.target }}
           config: ${{ needs.check-event.outputs.config }}
-          codesign: ${{ fromJSON(needs.check-event.outputs.codesign) }}
-          codesignIdent: ${{ steps.codesign.outputs.codesignIdent }}
-          codesignTeam: ${{ steps.codesign.outputs.codesignTeam }}
-          provisioningProfileUUID: ${{ steps.codesign.outputs.provisioningProfileUUID }}
+          # NAD: 直接禁用签名（无证书）
+          codesign: false
+          codesignIdent: '-'
+          codesignTeam: ''
+          provisioningProfileUUID: ''
+          version: ${{ needs.check-event.outputs.nadVersion }}
 
-      - name: Package OBS Studio 📀
+      - name: Package OBS Studio
         uses: ./.github/actions/package-obs
         with:
           target: ${{ matrix.target }}
           config: ${{ needs.check-event.outputs.config }}
           package: ${{ fromJSON(needs.check-event.outputs.package) }}
-          codesign: ${{ fromJSON(needs.check-event.outputs.codesign) && fromJSON(steps.codesign.outputs.haveCodesignIdent) }}
-          codesignIdent: ${{ steps.codesign.outputs.codesignIdent }}
-          notarize: ${{ fromJSON(needs.check-event.outputs.notarize) && fromJSON(steps.codesign.outputs.haveNotarizationUser) }}
-          codesignUser: ${{ secrets.MACOS_NOTARIZATION_USERNAME }}
-          codesignPass: ${{ secrets.MACOS_NOTARIZATION_PASSWORD }}
+          # NAD: 直接禁用签名和公证（无证书）
+          codesign: false
+          codesignIdent: '-'
+          notarize: false
+          codesignUser: ''
+          codesignPass: ''
 
-      - name: Upload Artifacts 📡
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: obs-studio-macos-${{ matrix.target }}-${{ needs.check-event.outputs.commitHash }}
           path: ${{ github.workspace }}/build_macos/obs-studio-*-macos-${{ steps.setup.outputs.cpuName }}.*
 
-      - name: Upload Debug Symbol Artifacts 🪲
+      - name: Upload Debug Symbol Artifacts
         uses: actions/upload-artifact@v4
         if: ${{ needs.check-event.outputs.config == 'Release' }}
         with:
@@ -169,12 +275,10 @@ jobs:
           key: ${{ runner.os }}-ccache-${{ matrix.target }}-${{ needs.check-event.outputs.config }}
 
   ubuntu-build:
-    name: Ubuntu 🐧
-    strategy:
-      matrix:
-        os: [ubuntu-24.04]
-    runs-on: ${{ matrix.os }}
+    name: Ubuntu
+    runs-on: ubuntu-24.04
     needs: check-event
+    if: false  # 禁用 Linux 构建
     defaults:
       run:
         shell: bash
@@ -192,7 +296,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ matrix.os }}-ccache-x86_64-
 
-      - name: Build OBS Studio 🧱
+      - name: Build OBS Studio
         uses: ./.github/actions/build-obs
         env:
           TWITCH_CLIENTID: ${{ secrets.TWITCH_CLIENT_ID }}
@@ -207,26 +311,26 @@ jobs:
           target: x86_64
           config: ${{ needs.check-event.outputs.config }}
 
-      - name: Package OBS Studio 📀
+      - name: Package OBS Studio
         uses: ./.github/actions/package-obs
         with:
           target: x86_64
           config: ${{ needs.check-event.outputs.config }}
           package: ${{ fromJSON(needs.check-event.outputs.package) }}
 
-      - name: Upload Source Tarball 🗜️
+      - name: Upload Source Tarball
         uses: actions/upload-artifact@v4
         with:
           name: obs-studio-${{ matrix.os }}-sources-${{ needs.check-event.outputs.commitHash }}
           path: ${{ github.workspace }}/build_ubuntu/obs-studio-*-sources.*
 
-      - name: Upload Artifacts 📡
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: obs-studio-${{ matrix.os }}-x86_64-${{ needs.check-event.outputs.commitHash }}
           path: ${{ github.workspace }}/build_ubuntu/obs-studio-*-x86_64-ubuntu-gnu.*
 
-      - name: Upload Debug Symbol Artifacts 🪲
+      - name: Upload Debug Symbol Artifacts
         uses: actions/upload-artifact@v4
         if: ${{ fromJSON(needs.check-event.outputs.package) }}
         with:
@@ -240,9 +344,10 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.os }}-ccache-x86_64-${{ needs.check-event.outputs.config }}
 
   flatpak-build:
-    name: Flatpak 📦
+    name: Flatpak
     runs-on: ubuntu-24.04
     needs: check-event
+    if: false  # 禁用 Flatpak 构建
     defaults:
       run:
         shell: bash
@@ -258,12 +363,12 @@ jobs:
           fetch-depth: 0
           set-safe-directory: ${{ env.GITHUB_WORKSPACE }}
 
-      - name: Set Up Environment 🔧
+      - name: Set Up Environment
         id: setup
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          : Set Up Environment 🔧
+          : Set Up Environment
           if [[ "${RUNNER_DEBUG}" ]]; then set -x; fi
 
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
@@ -287,7 +392,7 @@ jobs:
           artifact: manifest
           path: build-aux/com.obsproject.Studio.json
 
-      - name: Build Flatpak Manifest 🧾
+      - name: Build Flatpak Manifest
         uses: flatpak/flatpak-github-actions/flatpak-builder@b8a638469ea7ec62844d7b6e487b697e6f249576
         with:
           build-bundle: ${{ fromJSON(needs.check-event.outputs.package) }}
@@ -324,12 +429,13 @@ jobs:
           path: repo
 
   windows-build:
-    name: Windows 🪟
+    name: Windows
+    runs-on: windows-2022
+    needs: check-event
+    if: false  # 禁用 Windows 构建
     strategy:
       matrix:
         architecture: [x64, arm64]
-    runs-on: windows-2022
-    needs: check-event
     defaults:
       run:
         shell: pwsh
@@ -339,7 +445,7 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Build OBS Studio 🧱
+      - name: Build OBS Studio
         uses: ./.github/actions/build-obs
         env:
           TWITCH_CLIENTID: ${{ secrets.TWITCH_CLIENT_ID }}
@@ -355,14 +461,14 @@ jobs:
           target: ${{ matrix.architecture }}
           config: ${{ needs.check-event.outputs.config }}
 
-      - name: Package OBS Studio 📀
+      - name: Package OBS Studio
         uses: ./.github/actions/package-obs
         with:
           target: ${{ matrix.architecture }}
           config: ${{ needs.check-event.outputs.config }}
           package: ${{ fromJSON(needs.check-event.outputs.package) }}
 
-      - name: Upload Artifacts 📡
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: obs-studio-windows-${{ matrix.architecture }}-${{ needs.check-event.outputs.commitHash }}

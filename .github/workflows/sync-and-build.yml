@@ -1,0 +1,173 @@
+name: Sync and Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_version:
+        description: 'Upstream version tag to sync and build (e.g., 32.0.2)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Sync Upstream Tag
+    runs-on: ubuntu-24.04
+    outputs:
+      nad_version: ${{ steps.release_info.outputs.nad_version }}
+      upstream_version: ${{ steps.release_info.outputs.upstream_version }}
+      commit_sha: ${{ steps.merge.outputs.commit_sha }}
+    env:
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'master' }}
+      UPSTREAM_REPO: https://github.com/obsproject/obs-studio.git
+      PUSH_TOKEN: ${{ secrets.NAD_AUTOMATION_TOKEN || secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ env.PUSH_TOKEN }}
+
+      - name: Resolve Release Info
+        id: release_info
+        run: |
+          set -euo pipefail
+          upstream_version="${{ github.event.inputs.upstream_version }}"
+          nad_version="${upstream_version}-nad"
+          echo "Upstream version: ${upstream_version}"
+          echo "NAD version: ${nad_version}"
+          echo "upstream_version=${upstream_version}" >> "${GITHUB_OUTPUT}"
+          echo "nad_version=${nad_version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Configure Git
+        run: |
+          git config user.name "NAD Sync Bot"
+          git config user.email "noreply@github.com"
+          git remote set-url origin "https://x-access-token:${{ env.PUSH_TOKEN }}@github.com/${{ github.repository }}.git"
+
+      - name: Merge Upstream Tag
+        id: merge
+        run: |
+          set -euo pipefail
+          UPSTREAM_VERSION="${{ steps.release_info.outputs.upstream_version }}"
+
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream ${{ env.UPSTREAM_REPO }}
+          else
+            git remote add upstream ${{ env.UPSTREAM_REPO }}
+          fi
+
+          git fetch upstream --tags --prune
+          git fetch origin "${DEFAULT_BRANCH}" --prune
+
+          git checkout "${DEFAULT_BRANCH}"
+          git reset --hard "origin/${DEFAULT_BRANCH}"
+
+          echo "Merging upstream tag v${UPSTREAM_VERSION} with protected files..."
+          git config merge.ours.driver true
+          
+          cat > .gitattributes << EOF
+          README.md merge=ours
+          .github/workflows/ merge=ours
+          EOF
+          
+          git add .gitattributes
+          
+          git merge --no-ff --commit -m "feat: sync with upstream v${UPSTREAM_VERSION}" "refs/tags/v${UPSTREAM_VERSION}" || {
+            echo "Merge conflict detected, resolving with protected files..."
+            git checkout --ours README.md 2>/dev/null || true
+            git checkout --ours .github/workflows/ 2>/dev/null || true
+            git add .
+            git commit --no-edit || true
+          }
+          
+          rm -f .gitattributes
+          git reset HEAD .gitattributes 2>/dev/null || true
+
+          echo "Pushing sync commit to ${{ env.DEFAULT_BRANCH }}..."
+          git push origin "${{ env.DEFAULT_BRANCH }}"
+
+          echo "commit_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Save Version Info
+        run: |
+          echo '{"nad_version": "${{ steps.release_info.outputs.nad_version }}", "upstream_version": "${{ steps.release_info.outputs.upstream_version }}", "commit_sha": "${{ steps.merge.outputs.commit_sha }}"}' > version-info.json
+
+      - name: Upload Version Info
+        uses: actions/upload-artifact@v4
+        with:
+          name: version-info
+          path: version-info.json
+
+  build:
+    name: Build macOS
+    needs: sync
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [arm64, x86_64]
+        build_type: [no-aja, no-decklink]
+    defaults:
+      run:
+        shell: zsh --no-rcs --errexit --pipefail {0}
+    
+    steps:
+      - name: Checkout Synced Commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.commit_sha }}
+          submodules: recursive
+
+      - name: Set Up Environment
+        id: setup
+        run: |
+          sudo xcode-select --switch /Applications/Xcode_16.4.app/Contents/Developer
+          local -A arch_names=(x86_64 intel arm64 apple)
+          print "cpuName=${arch_names[${{ matrix.target }}]}" >> $GITHUB_OUTPUT
+
+      - name: Build and Package
+        env:
+          UPSTREAM_VERSION: ${{ needs.sync.outputs.upstream_version }}
+          BUILD_TYPE: ${{ matrix.build_type }}
+        run: |
+          set -euo pipefail
+          
+          # 1. Configure using CMake, mimicking the build-macos script
+          CMAKE_FLAGS=("--preset macos-ci" "-B build_macos" "-DCMAKE_OSX_ARCHITECTURES=${{ matrix.target }}")
+
+          if [[ "${BUILD_TYPE}" == "no-aja" ]]; then
+            CMAKE_FLAGS+=("-DENABLE_AJA=OFF" "-DENABLE_DECKLINK=ON")
+          elif [[ "${BUILD_TYPE}" == "no-decklink" ]]; then
+            CMAKE_FLAGS+=("-DENABLE_DECKLINK=OFF" "-DENABLE_AJA=ON")
+          fi
+
+          VERSION_OVERRIDE="${UPSTREAM_VERSION}-${BUILD_TYPE}"
+          CMAKE_FLAGS+=("-DOBS_VERSION_OVERRIDE=${VERSION_OVERRIDE}")
+
+          echo "Running CMake with flags: ${CMAKE_FLAGS[*]}"
+          cmake -S . ${CMAKE_FLAGS[*]}
+
+          # 2. Build using xcodebuild
+          echo "Building with xcodebuild..."
+          xcodebuild -project build_macos/obs-studio.xcodeproj -target obs-studio -configuration RelWithDebInfo -parallelizeTargets
+
+          # 3. Manually create the DMG
+          echo "Packaging manually..."
+          mkdir -p staging/OBS.app
+          ditto build_macos/frontend/RelWithDebInfo/OBS.app staging/OBS.app
+          
+          DMG_NAME="OBS-Studio-${VERSION_OVERRIDE}-macOS-${{ matrix.target }}".dmg
+          hdiutil create -fs HFS+ -srcfolder staging -volname "OBS Studio" "${DMG_NAME}"
+
+          # Move DMG to a predictable location for upload
+          mv "${DMG_NAME}" build_macos/
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-studio-macos-${{ matrix.target }}-${{ matrix.build_type }}
+          path: build_macos/OBS-Studio-*.dmg

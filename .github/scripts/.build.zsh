@@ -17,7 +17,7 @@ setopt FUNCTION_ARGZERO
 #setopt XTRACE
 
 if (( ! ${+CI} )) {
-  print -u2 -PR "%F{1}    ✖︎ ${ZSH_ARGZERO:t:r} requires CI environment.%f"
+  print -u2 -PR "%F{1}    ✖ ${ZSH_ARGZERO:t:r} requires CI environment.%f"
   exit 1
 }
 
@@ -27,7 +27,7 @@ autoload -Uz is-at-least && if ! is-at-least 5.9; then
 fi
 
 TRAPZERR() {
-  print -u2 -PR "::error::%F{1}    ✖︎ script execution error.%f"
+  print -u2 -PR "::error::%F{1}    ✖ script execution error.%f"
   print -PR -e "
   Callstack:
   ${(j:\n     :)funcfiletrace}
@@ -125,6 +125,10 @@ build() {
     macos-*)
       cmake_args+=(--preset 'macos-ci' -DCMAKE_OSX_ARCHITECTURES:STRING=${target##*-})
 
+      if [[ -n ${OBS_VERSION_OVERRIDE:-} ]] {
+        cmake_args+=(-DOBS_VERSION_OVERRIDE:STRING="${OBS_VERSION_OVERRIDE}")
+      }
+
       typeset -gx NSUnbufferedIO=YES
 
       typeset -gx CODESIGN_IDENT="${CODESIGN_IDENT:--}"
@@ -193,7 +197,7 @@ build() {
       if (( analyze )) {
         run_xcodebuild ${analyze_args}
       } else {
-        if [[ ${GITHUB_EVENT_NAME} == push && ${GITHUB_REF_NAME} =~ [0-9]+.[0-9]+.[0-9]+(-(rc|beta).+)? ]] {
+        if (( codesign )) && [[ ${GITHUB_EVENT_NAME} == push && ${GITHUB_REF_NAME} =~ [0-9]+.[0-9]+.[0-9]+(-(rc|beta).+)? ]] {
           run_xcodebuild ${archive_args}
           run_xcodebuild ${export_args}
         } else {
@@ -213,6 +217,10 @@ build() {
         -DENABLE_BROWSER:BOOL=ON
         -DCEF_ROOT_DIR:PATH="${project_root}/.deps/cef_binary_${CEF_VERSION}_${target//ubuntu-/linux_}"
       )
+
+      if [[ -n ${OBS_VERSION_OVERRIDE:-} ]] {
+        cmake_args+=(-DOBS_VERSION_OVERRIDE:STRING="${OBS_VERSION_OVERRIDE}")
+      }
 
       cmake_build_args+=(build_${target%%-*} --config ${config} --parallel)
       cmake_install_args+=(build_${target%%-*} --prefix ${project_root}/build_${target%%-*}/install/${config})

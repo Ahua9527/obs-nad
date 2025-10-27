@@ -1,0 +1,98 @@
+name: Watch Upstream Releases
+
+on:
+  schedule:
+    # 每3天检查一次上游发布
+    - cron: '0 0 */3 * *'
+  workflow_dispatch:
+    inputs:
+      force_check:
+        description: '强制检查（即使标签已存在）'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  check-upstream:
+    name: Check Upstream Releases
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check Latest Upstream Release
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_CHECK: ${{ github.event.inputs.force_check || 'false' }}
+        run: |
+          set -euo pipefail
+          
+          echo "Checking for new releases from obsproject/obs-studio..."
+          
+          # 获取上游最新发布（包括 pre-release）
+          upstream_release=$(gh api /repos/obsproject/obs-studio/releases --jq '.[0]')
+
+          if [[ -z "${upstream_release}" || "${upstream_release}" == "null" ]]; then
+            echo "::error::Failed to fetch latest release from upstream or no releases found."
+            exit 1
+          fi
+          
+          upstream_tag=$(echo "$upstream_release" | jq -r '.tag_name' | sed 's/^v//')
+          is_prerelease=$(echo "$upstream_release" | jq -r '.prerelease')
+          release_name=$(echo "$upstream_release" | jq -r '.name')
+          
+          echo "Found upstream release: ${upstream_tag} (prerelease: ${is_prerelease})"
+          echo "Release name: ${release_name}"
+          
+          # Check if the corresponding -nad tag already exists in our repo
+          nad_tag="${upstream_tag}-nad"
+          
+          if [[ "${FORCE_CHECK}" == "true" ]]; then
+            echo "Force check enabled, will trigger sync."
+            should_sync=true
+          elif gh api "/repos/${{ github.repository }}/git/ref/tags/${nad_tag}" > /dev/null 2>&1; then
+            echo "Tag ${nad_tag} already exists, skipping sync."
+            should_sync=false
+          else
+            echo "New upstream release detected: ${upstream_tag}. Triggering sync."
+            should_sync=true
+          fi
+          
+          {
+            echo "should_sync=${should_sync}"
+            echo "upstream_version=${upstream_tag}"
+            echo "nad_tag=${nad_tag}"
+            echo "is_prerelease=${is_prerelease}"
+            echo "release_name=${release_name}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Trigger Sync & Build Workflow
+        if: steps.check.outputs.should_sync == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.NAD_AUTOMATION_TOKEN || secrets.GITHUB_TOKEN }}
+          UPSTREAM_VERSION: ${{ steps.check.outputs.upstream_version }}
+        run: |
+          echo "Triggering 'Sync and Build' workflow for version ${UPSTREAM_VERSION}"
+          
+          gh workflow run sync-and-build.yml -f upstream_version=${UPSTREAM_VERSION}
+
+          echo "✅ 'Sync and Build' workflow triggered successfully for ${UPSTREAM_VERSION}"
+          echo "Expected NAD tag: ${{ steps.check.outputs.nad_tag }}"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Upstream Release Check Summary 📊" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Upstream Version**: ${{ steps.check.outputs.upstream_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **NAD Tag**: ${{ steps.check.outputs.nad_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Is Pre-release**: ${{ steps.check.outputs.is_prerelease }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Sync Triggered**: ${{ steps.check.outputs.should_sync }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ steps.check.outputs.should_sync }}" == "true" ]]; then
+            echo "🚀 Sync workflow has been triggered. Check the [Actions](https://github.com/${{ github.repository }}/actions) page." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "ℹ️ No sync needed - tag already exists or no new release found." >> $GITHUB_STEP_SUMMARY
+          fi

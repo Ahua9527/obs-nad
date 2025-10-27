@@ -17,7 +17,7 @@ setopt FUNCTION_ARGZERO
 #setopt XTRACE
 
 if (( ! ${+CI} )) {
-  print -u2 -PR "%F{1}    ✖︎ ${ZSH_ARGZERO:t:r} requires CI environment%f"
+  print -u2 -PR "%F{1}    ✖ ${ZSH_ARGZERO:t:r} requires CI environment%f"
   exit 1
 }
 
@@ -27,7 +27,7 @@ autoload -Uz is-at-least && if ! is-at-least 5.9; then
 fi
 
 TRAPZERR() {
-  print -u2 -PR "::error::%F{1}    ✖︎ script execution error%f"
+  print -u2 -PR "::error::%F{1}    ✖ script execution error%f"
   print -PR -e "
   Callstack:
   ${(j:\n     :)funcfiletrace}
@@ -110,20 +110,54 @@ package() {
 
   local commit_version='0.0.0'
   local commit_distance='0'
-  local commit_hash
+  local commit_hash='0000000'
 
   if [[ -d ${project_root}/.git ]] {
-    local git_description="$(git describe --tags --long)"
-    commit_version="${${git_description%-*}%-*}"
-    commit_hash="${git_description##*-g}"
-    commit_distance="${${git_description%-*}##*-}"
+    local git_description
+    # Try git describe with --tags --long first
+    git_description="$(git describe --tags --long 2>/dev/null)" || {
+      # Fallback: try without --long
+      git_description="$(git describe --tags 2>/dev/null)" || {
+        # Fallback: use commit hash as version
+        git_description="0.0.0-0-g$(git rev-parse --short HEAD 2>/dev/null || echo '0000000')"
+      }
+    }
+    
+    # Validate the format and parse
+    if [[ ${git_description} =~ ^[^-]+-[0-9]+-g[0-9a-f]+$ ]] {
+      # Standard format: v1.2.3-4-g1234567
+      commit_version="${${git_description%-*}%-*}"
+      commit_hash="${git_description##*-g}"
+      commit_distance="${${git_description%-*}##*-}"
+    } else {
+      # Non-standard format, try to extract what we can
+      if [[ ${git_description} =~ ^([^-]+)(-([0-9]+))?(-g([0-9a-f]+))?$ ]] {
+        commit_version="${match[1]}"
+        commit_distance="${match[3]:-0}"
+        commit_hash="${match[5]:-$(git rev-parse --short HEAD 2>/dev/null || echo '0000000')}"
+      } else {
+        # Cannot parse, use defaults with current hash
+        commit_version='0.0.0'
+        commit_distance='0'
+        commit_hash="$(git rev-parse --short HEAD 2>/dev/null || echo '0000000')"
+      }
+    }
+    
+    # Ensure commit_distance is an integer
+    if ! [[ ${commit_distance} =~ ^[0-9]+$ ]] {
+      commit_distance='0'
+    }
   }
+
+  local artifact_prefix='obs-studio-no-aja'
+  local app_suffix='-no-aja'
+  local app_bundle_name="OBS Studio${app_suffix}.app"
 
   local output_name
   if (( commit_distance > 0 )) {
-    output_name="obs-studio-${commit_version}-${commit_hash}"
+    output_name="${artifact_prefix}-${commit_version}-${commit_hash}"
   } else {
-    output_name="obs-studio-${commit_version}"
+    output_name="${artifact_prefix}-${commit_version}"
   }
 
   if [[ ${host_os} == macos ]] {
@@ -135,11 +169,12 @@ package() {
     local -A arch_names=(x86_64 Intel arm64 Apple)
     output_name="${output_name}-macos-${(L)arch_names[${target##*-}]}"
 
+    local display_name="OBS Studio${app_suffix}"
     local volume_name
     if (( commit_distance > 0 )) {
-      volume_name="OBS Studio ${commit_version}-${commit_hash} (${arch_names[${target##*-}]})"
+      volume_name="${display_name} ${commit_version}-${commit_hash} (${arch_names[${target##*-}]})"
     } else {
-      volume_name="OBS Studio ${commit_version} (${arch_names[${target##*-}]})"
+      volume_name="${display_name} ${commit_version} (${arch_names[${target##*-}]})"
     }
 
     if (( package )) {
@@ -150,8 +185,9 @@ package() {
       cp ${project_root}/cmake/macos/resources/AppIcon.icns obs-studio/.VolumeIcon.icns
       ln -s /Applications obs-studio/Applications
 
-      mkdir -p obs-studio/OBS.app
-      ditto OBS.app obs-studio/OBS.app
+      local bundle_path="obs-studio/${app_bundle_name}"
+      mkdir -p "${bundle_path}"
+      ditto OBS.app "${bundle_path}"
 
       local -i _status=0
 
@@ -191,7 +227,11 @@ package() {
     } else {
       log_group "Archiving obs-studio..."
       pushd build_macos
-      XZ_OPT=-T0 tar -cvJf ${output_name}.tar.xz OBS.app
+      local archive_bundle="${app_bundle_name}"
+      rm -rf -- "${archive_bundle}"
+      ditto OBS.app "${archive_bundle}"
+      XZ_OPT=-T0 tar -cvJf ${output_name}.tar.xz "${archive_bundle}"
+      rm -rf -- "${archive_bundle}"
       popd
     }
 

@@ -54,6 +54,10 @@ function Build {
 
     $CmakeArgs = @('--preset', "windows-ci-${Target}")
 
+    if ( $env:OBS_VERSION_OVERRIDE ) {
+        $CmakeArgs += @("-DOBS_VERSION_OVERRIDE:STRING=${env:OBS_VERSION_OVERRIDE}")
+    }
+
     $CmakeBuildArgs = @('--build')
     $CmakeInstallArgs = @()
 
