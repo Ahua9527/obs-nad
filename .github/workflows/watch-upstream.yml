@@ -75,7 +75,7 @@ jobs:
         run: |
           echo "Triggering 'Sync and Build' workflow for version ${UPSTREAM_VERSION}"
           
-          gh workflow run sync-and-build.yml -f upstream_version=${UPSTREAM_VERSION}
+          gh workflow run sync-and-build.yml -f upstream_version=${UPSTREAM_VERSION} --repo ${{ github.repository }}
 
           echo "✅ 'Sync and Build' workflow triggered successfully for ${UPSTREAM_VERSION}"
           echo "Expected NAD tag: ${{ steps.check.outputs.nad_tag }}"
