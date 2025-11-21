@@ -71,28 +71,42 @@ jobs:
         if: steps.check.outputs.should_sync == 'true'
         env:
           GH_TOKEN: ${{ secrets.NAD_AUTOMATION_TOKEN || secrets.GITHUB_TOKEN }}
-          UPSTREAM_VERSION: ${{ steps.check.outputs.upstream_version }}
         run: |
-          echo "Triggering 'Sync and Build' workflow for version ${UPSTREAM_VERSION}"
-          
-          gh workflow run sync-and-build.yml -f upstream_version=${UPSTREAM_VERSION} --repo ${{ github.repository }}
+          set -euo pipefail
 
-          echo "✅ 'Sync and Build' workflow triggered successfully for ${UPSTREAM_VERSION}"
+          upstream_version="${{ steps.check.outputs.upstream_version }}"
+          repository="${{ github.repository }}"
+
+          echo "Triggering 'Sync and Build' workflow for version ${upstream_version}"
+
+          gh workflow run sync-and-build.yml -f "upstream_version=${upstream_version}" --repo "${repository}"
+
+          echo "✅ 'Sync and Build' workflow triggered successfully for ${upstream_version}"
           echo "Expected NAD tag: ${{ steps.check.outputs.nad_tag }}"
 
       - name: Summary
         if: always()
         run: |
-          echo "### Upstream Release Check Summary 📊" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Upstream Version**: ${{ steps.check.outputs.upstream_version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **NAD Tag**: ${{ steps.check.outputs.nad_tag }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Is Pre-release**: ${{ steps.check.outputs.is_prerelease }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Sync Triggered**: ${{ steps.check.outputs.should_sync }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          
-          if [[ "${{ steps.check.outputs.should_sync }}" == "true" ]]; then
-            echo "🚀 Sync workflow has been triggered. Check the [Actions](https://github.com/${{ github.repository }}/actions) page." >> $GITHUB_STEP_SUMMARY
-          else
-            echo "ℹ️ No sync needed - tag already exists or no new release found." >> $GITHUB_STEP_SUMMARY
-          fi
+          set -euo pipefail
+
+          upstream_version="${{ steps.check.outputs.upstream_version }}"
+          nad_tag="${{ steps.check.outputs.nad_tag }}"
+          is_prerelease="${{ steps.check.outputs.is_prerelease }}"
+          should_sync="${{ steps.check.outputs.should_sync }}"
+          repository="${{ github.repository }}"
+
+          {
+            echo "### Upstream Release Check Summary 📊"
+            echo ""
+            echo "- **Upstream Version**: ${upstream_version}"
+            echo "- **NAD Tag**: ${nad_tag}"
+            echo "- **Is Pre-release**: ${is_prerelease}"
+            echo "- **Sync Triggered**: ${should_sync}"
+            echo ""
+
+            if [[ "${should_sync}" == "true" ]]; then
+              echo "🚀 Sync workflow has been triggered. Check the [Actions](https://github.com/${repository}/actions) page."
+            else
+              echo "ℹ️ No sync needed - tag already exists or no new release found."
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
