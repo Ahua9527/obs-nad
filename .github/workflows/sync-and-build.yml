@@ -138,6 +138,10 @@ jobs:
           rm -rf build_macos
           find . -name CMakeCache.txt -delete
 
+      - name: Debug deployment target env
+        run: |
+          env | sort | egrep 'MACOSX|OSX_DEPLOYMENT|CMAKE_OSX' || true
+
       - name: Build OBS
         env:
           UPSTREAM_VERSION: ${{ needs.sync.outputs.upstream_version }}
