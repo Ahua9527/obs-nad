@@ -125,7 +125,7 @@ jobs:
       - name: Set Up Environment
         id: setup
         run: |
-          sudo xcode-select --switch /Applications/Xcode_16.4.app/Contents/Developer
+          sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
           local -A arch_names=(x86_64 intel arm64 apple)
           print "cpuName=${arch_names[${{ matrix.target }}]}" >> $GITHUB_OUTPUT
 
