@@ -106,6 +106,10 @@ jobs:
     name: Build macOS
     needs: sync
     runs-on: [self-hosted, macOS, ARM64]
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      MACOSX_DEPLOYMENT_TARGET: 14.0
+      CMAKE_OSX_DEPLOYMENT_TARGET: 14.0
     strategy:
       fail-fast: false
       matrix:
@@ -128,6 +132,11 @@ jobs:
           echo "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer" >> $GITHUB_ENV
           local -A arch_names=(x86_64 intel arm64 apple)
           print "cpuName=${arch_names[${{ matrix.target }}]}" >> $GITHUB_OUTPUT
+
+      - name: Clean build artifacts
+        run: |
+          rm -rf build_macos
+          find . -name CMakeCache.txt -delete
 
       - name: Build OBS
         env:

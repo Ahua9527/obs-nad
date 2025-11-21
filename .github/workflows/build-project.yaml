@@ -171,6 +171,10 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64]
     needs: check-event
     # NAD: 始终构建 macOS，包括标签推送时
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      MACOSX_DEPLOYMENT_TARGET: 14.0
+      CMAKE_OSX_DEPLOYMENT_TARGET: 14.0
     strategy:
       fail-fast: false
       matrix:
@@ -206,6 +210,11 @@ jobs:
 
           local -A arch_names=(x86_64 intel arm64 apple)
           print "cpuName=${arch_names[${{ matrix.target }}]}" >> $GITHUB_OUTPUT
+
+      - name: Clean build artifacts
+        run: |
+          rm -rf build_macos
+          find . -name CMakeCache.txt -delete
 
       - uses: actions/cache/restore@v4
         id: ccache-cache
