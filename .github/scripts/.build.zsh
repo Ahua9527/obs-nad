@@ -129,7 +129,7 @@ build() {
 
   case ${target} {
     macos-*)
-      cmake_args+=(--preset 'macos-ci' -DCMAKE_OSX_ARCHITECTURES:STRING=${target##*-})
+      cmake_args+=(--preset 'macos-ci' -DCMAKE_OSX_ARCHITECTURES:STRING=${target##*-} -DENABLE_CCACHE:BOOL=OFF)
 
       if [[ -n ${OBS_VERSION_OVERRIDE:-} ]] {
         cmake_args+=(-DOBS_VERSION_OVERRIDE:STRING="${OBS_VERSION_OVERRIDE}")
@@ -163,6 +163,11 @@ build() {
           }
         }
       }
+
+      local -a xc_env=(
+        MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET}
+        SDKROOT=macosx
+      )
 
       local -a build_args=(
         ONLY_ACTIVE_ARCH=NO
@@ -210,10 +215,10 @@ build() {
         run_xcodebuild ${analyze_args}
       } else {
         if (( codesign )) && [[ ${GITHUB_EVENT_NAME} == push && ${GITHUB_REF_NAME} =~ [0-9]+.[0-9]+.[0-9]+(-(rc|beta).+)? ]] {
-          run_xcodebuild ${archive_args}
-          run_xcodebuild ${export_args}
+          run_xcodebuild ${xc_env} ${archive_args}
+          run_xcodebuild ${xc_env} ${export_args}
         } else {
-          run_xcodebuild ${build_args}
+          run_xcodebuild ${xc_env} ${build_args}
 
           rm -rf OBS.app
           mkdir OBS.app
