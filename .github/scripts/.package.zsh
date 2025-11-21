@@ -194,6 +194,17 @@ package() {
       mkdir -p "${bundle_path}"
       ditto OBS.app "${bundle_path}"
 
+      # Read version from Info.plist if available (override git-based version)
+      local info_plist_path="${bundle_path}/Contents/Info.plist"
+      if [[ -f "${info_plist_path}" ]]; then
+        local plist_version
+        plist_version="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "${info_plist_path}" 2>/dev/null)"
+        if [[ -n "${plist_version}" && "${plist_version}" != "0.0.0" ]]; then
+          commit_version="${plist_version}"
+          log_info "Using version from Info.plist: ${commit_version}"
+        fi
+      fi
+
       # Generate dynamic AppleScript with the correct app name
       local temp_applescript="${project_root}/build_macos/package_temp.applescript"
       log_info "Generating AppleScript for: ${app_bundle_name}"
