@@ -190,8 +190,8 @@ jobs:
           : Set Up Environment
           if (( ${+RUNNER_DEBUG} )) setopt XTRACE
 
-          print '::group::Enable Xcode'
-          sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+          print '::group::Select Xcode (no sudo)' 
+          echo "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer" >> $GITHUB_ENV
           print '::endgroup::'
 
           print '::group::Clean Homebrew Environment'
