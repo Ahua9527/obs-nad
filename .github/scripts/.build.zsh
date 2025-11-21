@@ -105,7 +105,7 @@ build() {
 
   check_${host_os}
   # Enforce a single deployment target to avoid mixed values leaking from env
-  : ${MACOSX_DEPLOYMENT_TARGET:=14.0}
+  : ${MACOSX_DEPLOYMENT_TARGET:=12.0}
   export MACOSX_DEPLOYMENT_TARGET
   if [[ -z ${CMAKE_OSX_DEPLOYMENT_TARGET:-} ]]; then
     export CMAKE_OSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET}

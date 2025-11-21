@@ -173,8 +173,8 @@ jobs:
     # NAD: 始终构建 macOS，包括标签推送时
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
-      MACOSX_DEPLOYMENT_TARGET: 14.0
-      CMAKE_OSX_DEPLOYMENT_TARGET: 14.0
+      MACOSX_DEPLOYMENT_TARGET: 12.0
+      CMAKE_OSX_DEPLOYMENT_TARGET: 12.0
     strategy:
       fail-fast: false
       matrix:
