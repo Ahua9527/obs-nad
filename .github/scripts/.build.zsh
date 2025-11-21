@@ -129,6 +129,12 @@ build() {
         cmake_args+=(-DOBS_VERSION_OVERRIDE:STRING="${OBS_VERSION_OVERRIDE}")
       }
 
+      # Support additional CMake flags from environment variable
+      if [[ -n ${CMAKE_EXTRA_FLAGS:-} ]] {
+        log_info "Adding extra CMake flags: ${CMAKE_EXTRA_FLAGS}"
+        cmake_args+=(${(z)CMAKE_EXTRA_FLAGS})
+      }
+
       typeset -gx NSUnbufferedIO=YES
 
       typeset -gx CODESIGN_IDENT="${CODESIGN_IDENT:--}"

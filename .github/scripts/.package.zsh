@@ -149,9 +149,14 @@ package() {
     }
   }
 
-  local artifact_prefix='obs-studio-no-aja'
-  local app_suffix='-no-aja'
+  # Read BUILD_TYPE from environment variable, default to 'no-aja' for backward compatibility
+  local build_type="${BUILD_TYPE:-no-aja}"
+  local artifact_prefix="obs-studio-${build_type}"
+  local app_suffix="-${build_type}"
   local app_bundle_name="OBS Studio${app_suffix}.app"
+
+  log_info "Building with BUILD_TYPE: ${build_type}"
+  log_info "Application bundle name: ${app_bundle_name}"
 
   local output_name
   if (( commit_distance > 0 )) {
@@ -189,10 +194,20 @@ package() {
       mkdir -p "${bundle_path}"
       ditto OBS.app "${bundle_path}"
 
+      # Generate dynamic AppleScript with the correct app name
+      local temp_applescript="${project_root}/build_macos/package_temp.applescript"
+      log_info "Generating AppleScript for: ${app_bundle_name}"
+      sed "s/APP_NAME_PLACEHOLDER/${app_bundle_name}/g" \
+        "${project_root}/cmake/macos/resources/package.applescript" > "${temp_applescript}"
+
       local -i _status=0
 
       autoload -Uz create_diskimage
-      create_diskimage obs-studio ${volume_name} ${output_name} || _status=1
+      APPLESCRIPT_PATH="${temp_applescript}" \
+        create_diskimage obs-studio ${volume_name} ${output_name} || _status=1
+
+      # Clean up temporary AppleScript
+      rm -f "${temp_applescript}"
 
       rm -r obs-studio
       if (( _status )) {

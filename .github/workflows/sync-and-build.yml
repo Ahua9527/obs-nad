@@ -105,7 +105,7 @@ jobs:
   build:
     name: Build macOS
     needs: sync
-    runs-on: macos-15
+    runs-on: [self-hosted, macOS, ARM64]
     strategy:
       fail-fast: false
       matrix:
@@ -129,45 +129,50 @@ jobs:
           local -A arch_names=(x86_64 intel arm64 apple)
           print "cpuName=${arch_names[${{ matrix.target }}]}" >> $GITHUB_OUTPUT
 
-      - name: Build and Package
+      - name: Build OBS
         env:
           UPSTREAM_VERSION: ${{ needs.sync.outputs.upstream_version }}
           BUILD_TYPE: ${{ matrix.build_type }}
         run: |
-          set -euo pipefail
-          
-          # 1. Configure using CMake, mimicking the build-macos script
-          CMAKE_FLAGS=("--preset macos-ci" "-B build_macos" "-DCMAKE_OSX_ARCHITECTURES=${{ matrix.target }}")
+          # Set version override
+          VERSION_OVERRIDE="${UPSTREAM_VERSION}-${BUILD_TYPE}"
+          export OBS_VERSION_OVERRIDE="${VERSION_OVERRIDE}"
 
+          # Set CMake flags based on build type
           if [[ "${BUILD_TYPE}" == "no-aja" ]]; then
-            CMAKE_FLAGS+=("-DENABLE_AJA=OFF" "-DENABLE_DECKLINK=ON")
+            export CMAKE_EXTRA_FLAGS="-DENABLE_AJA=OFF -DENABLE_DECKLINK=ON"
           elif [[ "${BUILD_TYPE}" == "no-decklink" ]]; then
-            CMAKE_FLAGS+=("-DENABLE_DECKLINK=OFF" "-DENABLE_AJA=ON")
+            export CMAKE_EXTRA_FLAGS="-DENABLE_DECKLINK=OFF -DENABLE_AJA=ON"
           fi
 
-          VERSION_OVERRIDE="${UPSTREAM_VERSION}-${BUILD_TYPE}"
-          CMAKE_FLAGS+=("-DOBS_VERSION_OVERRIDE=${VERSION_OVERRIDE}")
+          # Disable code signing
+          export CODESIGN_IDENT='-'
 
-          echo "Running CMake with flags: ${CMAKE_FLAGS[*]}"
-          cmake -S . ${CMAKE_FLAGS[*]}
+          echo "Building OBS with BUILD_TYPE=${BUILD_TYPE}, VERSION=${VERSION_OVERRIDE}"
+          echo "CMake extra flags: ${CMAKE_EXTRA_FLAGS}"
 
-          # 2. Build using xcodebuild
-          echo "Building with xcodebuild..."
-          xcodebuild -project build_macos/obs-studio.xcodeproj -target obs-studio -configuration RelWithDebInfo -parallelizeTargets
+          # Call official build script
+          .github/scripts/build-macos \
+            --target macos-${{ matrix.target }} \
+            --config RelWithDebInfo
 
-          # 3. Manually create the DMG
-          echo "Packaging manually..."
-          mkdir -p staging/OBS.app
-          ditto build_macos/frontend/RelWithDebInfo/OBS.app staging/OBS.app
-          
-          DMG_NAME="OBS-Studio-${VERSION_OVERRIDE}-macOS-${{ matrix.target }}".dmg
-          hdiutil create -fs HFS+ -srcfolder staging -volname "OBS Studio" "${DMG_NAME}"
+      - name: Package OBS
+        env:
+          BUILD_TYPE: ${{ matrix.build_type }}
+        run: |
+          # Disable code signing
+          export CODESIGN_IDENT='-'
 
-          # Move DMG to a predictable location for upload
-          mv "${DMG_NAME}" build_macos/
+          echo "Packaging OBS with BUILD_TYPE=${BUILD_TYPE}"
+
+          # Call official package script
+          .github/scripts/package-macos \
+            --target macos-${{ matrix.target }} \
+            --config RelWithDebInfo \
+            --package
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: obs-studio-macos-${{ matrix.target }}-${{ matrix.build_type }}
-          path: build_macos/OBS-Studio-*.dmg
+          path: build_macos/*.dmg

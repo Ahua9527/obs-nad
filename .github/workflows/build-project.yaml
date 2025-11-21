@@ -168,7 +168,7 @@ jobs:
 
   macos-build:
     name: macOS
-    runs-on: macos-15
+    runs-on: [self-hosted, macOS, ARM64]
     needs: check-event
     # NAD: 始终构建 macOS，包括标签推送时
     strategy:
@@ -292,9 +292,9 @@ jobs:
         id: ccache-cache
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ${{ runner.os }}-${{ matrix.os }}-ccache-x86_64-${{ needs.check-event.outputs.config }}
+          key: ${{ runner.os }}-ubuntu-ccache-x86_64-${{ needs.check-event.outputs.config }}
           restore-keys: |
-            ${{ runner.os }}-${{ matrix.os }}-ccache-x86_64-
+            ${{ runner.os }}-ubuntu-ccache-x86_64-
 
       - name: Build OBS Studio
         uses: ./.github/actions/build-obs
@@ -321,20 +321,20 @@ jobs:
       - name: Upload Source Tarball
         uses: actions/upload-artifact@v4
         with:
-          name: obs-studio-${{ matrix.os }}-sources-${{ needs.check-event.outputs.commitHash }}
+          name: obs-studio-ubuntu-sources-${{ needs.check-event.outputs.commitHash }}
           path: ${{ github.workspace }}/build_ubuntu/obs-studio-*-sources.*
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: obs-studio-${{ matrix.os }}-x86_64-${{ needs.check-event.outputs.commitHash }}
+          name: obs-studio-ubuntu-x86_64-${{ needs.check-event.outputs.commitHash }}
           path: ${{ github.workspace }}/build_ubuntu/obs-studio-*-x86_64-ubuntu-gnu.*
 
       - name: Upload Debug Symbol Artifacts
         uses: actions/upload-artifact@v4
         if: ${{ fromJSON(needs.check-event.outputs.package) }}
         with:
-          name: obs-studio-${{ matrix.os }}-x86_64-${{ needs.check-event.outputs.commitHash }}-dbgsym
+          name: obs-studio-ubuntu-x86_64-${{ needs.check-event.outputs.commitHash }}-dbgsym
           path: ${{ github.workspace }}/build_ubuntu/obs-studio-*-x86_64-ubuntu-gnu-dbgsym.ddeb
 
       - uses: actions/cache/save@v4
