@@ -202,6 +202,22 @@ package() {
         if [[ -n "${plist_version}" && "${plist_version}" != "0.0.0" ]]; then
           commit_version="${plist_version}"
           log_info "Using version from Info.plist: ${commit_version}"
+
+          # Regenerate volume_name and output_name with the new commit_version
+          if (( commit_distance > 0 )); then
+            output_name="${artifact_prefix}-${commit_version}-${commit_hash}"
+          else
+            output_name="${artifact_prefix}-${commit_version}"
+          fi
+          output_name="${output_name}-macos-${(L)arch_names[${target##*-}]}"
+
+          if (( commit_distance > 0 )); then
+            volume_name="${display_name} ${commit_version}-${commit_hash} (${arch_names[${target##*-}]}])"
+          else
+            volume_name="${display_name} ${commit_version} (${arch_names[${target##*-}]}])"
+          fi
+          log_info "Regenerated volume_name: ${volume_name}"
+          log_info "Regenerated output_name: ${output_name}"
         fi
       fi
 
