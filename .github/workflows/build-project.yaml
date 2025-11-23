@@ -168,11 +168,11 @@ jobs:
 
   macos-build:
     name: macOS
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: macos-15
     needs: check-event
     # NAD: 始终构建 macOS，包括标签推送时
     env:
-      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
       MACOSX_DEPLOYMENT_TARGET: 13.0
       CMAKE_OSX_DEPLOYMENT_TARGET: 13.0
     strategy:
@@ -194,8 +194,8 @@ jobs:
           : Set Up Environment
           if (( ${+RUNNER_DEBUG} )) setopt XTRACE
 
-          print '::group::Select Xcode (no sudo)' 
-          echo "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer" >> $GITHUB_ENV
+          print '::group::Select Xcode (no sudo)'
+          echo "DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer" >> $GITHUB_ENV
           print '::endgroup::'
 
           print '::group::Clean Homebrew Environment'
