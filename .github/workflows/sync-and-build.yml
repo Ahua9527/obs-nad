@@ -1,0 +1,338 @@
+name: Sync and Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_version:
+        description: 'Upstream version tag to sync and build (e.g., 32.0.2)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Sync Upstream Tag
+    runs-on: ubuntu-24.04
+    outputs:
+      nad_version: ${{ steps.release_info.outputs.nad_version }}
+      upstream_version: ${{ steps.release_info.outputs.upstream_version }}
+      commit_sha: ${{ steps.merge.outputs.commit_sha }}
+    env:
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'master' }}
+      UPSTREAM_REPO: https://github.com/obsproject/obs-studio.git
+      PUSH_TOKEN: ${{ secrets.NAD_AUTOMATION_TOKEN || secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ env.PUSH_TOKEN }}
+
+      - name: Resolve Release Info
+        id: release_info
+        run: |
+          set -euo pipefail
+          upstream_version="${{ github.event.inputs.upstream_version }}"
+          nad_version="${upstream_version}-no-aja"
+          echo "Upstream version: ${upstream_version}"
+          echo "NAD version: ${nad_version}"
+          echo "upstream_version=${upstream_version}" >> "${GITHUB_OUTPUT}"
+          echo "nad_version=${nad_version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Configure Git
+        run: |
+          git config user.name "NAD Sync Bot"
+          git config user.email "noreply@github.com"
+          git remote set-url origin "https://x-access-token:${{ env.PUSH_TOKEN }}@github.com/${{ github.repository }}.git"
+
+      - name: Merge Upstream Tag
+        id: merge
+        run: |
+          set -euo pipefail
+          UPSTREAM_VERSION="${{ steps.release_info.outputs.upstream_version }}"
+
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream ${{ env.UPSTREAM_REPO }}
+          else
+            git remote add upstream ${{ env.UPSTREAM_REPO }}
+          fi
+
+          git fetch upstream --tags --prune
+          git fetch origin "${DEFAULT_BRANCH}" --prune
+
+          git checkout "${DEFAULT_BRANCH}"
+          git reset --hard "origin/${DEFAULT_BRANCH}"
+
+          echo "Merging upstream tag v${UPSTREAM_VERSION} with protected files..."
+          git config merge.ours.driver true
+
+          cat > .git/info/attributes << EOF
+          .github/workflows/ merge=ours
+          build-aux/steam/scripts_macos/launch.sh merge=ours
+          EOF
+
+          # Check if build-aux/com.obsproject.Studio.json exists before merge
+          FLATPAK_MANIFEST="build-aux/com.obsproject.Studio.json"
+          MANIFEST_CHECK_NEEDED=false
+          CURRENT_MANIFEST_HASH=""
+
+          if [[ -f "$FLATPAK_MANIFEST" ]]; then
+            MANIFEST_CHECK_NEEDED=true
+            CURRENT_MANIFEST_HASH=$(git hash-object "$FLATPAK_MANIFEST")
+            echo "Detected $FLATPAK_MANIFEST, current hash: $CURRENT_MANIFEST_HASH"
+            echo "Will check for changes after merge..."
+          fi
+
+          # Check if CMakePresets.json exists before merge
+          CMAKE_PRESETS="CMakePresets.json"
+          PRESETS_CHECK_NEEDED=false
+          CURRENT_PRESETS_HASH=""
+
+          if [[ -f "$CMAKE_PRESETS" ]]; then
+            PRESETS_CHECK_NEEDED=true
+            CURRENT_PRESETS_HASH=$(git hash-object "$CMAKE_PRESETS")
+            echo "Detected $CMAKE_PRESETS, current hash: $CURRENT_PRESETS_HASH"
+            echo "Will check for changes after merge..."
+          fi
+
+          # Check if package.applescript exists before merge
+          PACKAGE_SCRIPT="cmake/macos/resources/package.applescript"
+          SCRIPT_CHECK_NEEDED=false
+          CURRENT_SCRIPT_HASH=""
+
+          if [[ -f "$PACKAGE_SCRIPT" ]]; then
+            SCRIPT_CHECK_NEEDED=true
+            CURRENT_SCRIPT_HASH=$(git hash-object "$PACKAGE_SCRIPT")
+            echo "Detected $PACKAGE_SCRIPT, current hash: $CURRENT_SCRIPT_HASH"
+            echo "Will check for changes after merge..."
+          fi
+
+          # Define scripts to check and capture their current hashes before merge
+          declare -A SCRIPT_HASHES_CURRENT
+          SYNC_SCRIPTS=(
+            "version-sync.py"
+            ".build.zsh"
+            ".package.zsh"
+            "Build-Windows.ps1"
+            "Package-Windows.ps1"
+          )
+
+          SCRIPTS_DIR=".github/scripts"
+          GITHUB_SCRIPTS_CHECK_NEEDED=false
+
+          # Capture current hashes for all scripts before merge
+          for script in "${SYNC_SCRIPTS[@]}"; do
+            script_path="$SCRIPTS_DIR/$script"
+            if [[ -f "$script_path" ]]; then
+              GITHUB_SCRIPTS_CHECK_NEEDED=true
+              SCRIPT_HASHES_CURRENT["$script"]=$(git hash-object "$script_path")
+              echo "Detected $script_path, current hash: ${SCRIPT_HASHES_CURRENT[$script]}"
+            fi
+          done
+
+          if [[ "$GITHUB_SCRIPTS_CHECK_NEEDED" == "true" ]]; then
+            echo "Will check for changes after merge..."
+          fi
+
+          git merge --no-ff --commit -m "feat: sync with upstream v${UPSTREAM_VERSION}" "refs/tags/v${UPSTREAM_VERSION}" || {
+            echo "Merge conflict detected, resolving with protected files..."
+            git checkout --ours .github/workflows/ 2>/dev/null || true
+            git checkout --ours build-aux/steam/scripts_macos/launch.sh 2>/dev/null || true
+            git add .
+            git commit --no-edit || true
+          }
+
+          # Check if manifest file was modified
+          if [[ "$MANIFEST_CHECK_NEEDED" == "true" ]]; then
+            NEW_MANIFEST_HASH=$(git hash-object "$FLATPAK_MANIFEST")
+            if [[ "$CURRENT_MANIFEST_HASH" != "$NEW_MANIFEST_HASH" ]]; then
+              echo "❗ WARNING: $FLATPAK_MANIFEST has been modified by upstream"
+              echo "Current hash: $CURRENT_MANIFEST_HASH"
+              echo "New hash: $NEW_MANIFEST_HASH"
+              echo ""
+              echo "The following customizations may need review:"
+              echo "  - AJA support configuration (-DENABLE_AJA)"
+              echo "  - DeckLink support configuration (-DENABLE_DECKLINK)"
+              echo "  - System permissions and security settings"
+              echo ""
+              echo "Please review the changes manually before proceeding."
+              exit 1
+            else
+              echo "✓ $FLATPAK_MANIFEST unchanged, continuing..."
+            fi
+          fi
+
+          # Check if package.applescript was modified
+          if [[ "$SCRIPT_CHECK_NEEDED" == "true" ]]; then
+            NEW_SCRIPT_HASH=$(git hash-object "$PACKAGE_SCRIPT")
+            if [[ "$CURRENT_SCRIPT_HASH" != "$NEW_SCRIPT_HASH" ]]; then
+              echo "❗ WARNING: $PACKAGE_SCRIPT has been modified by upstream"
+              echo "Current hash: $CURRENT_SCRIPT_HASH"
+              echo "New hash: $NEW_SCRIPT_HASH"
+              echo ""
+              echo "Please verify the following NAD customizations are preserved:"
+              echo "  - APP_NAME_PLACEHOLDER variable (not hardcoded 'OBS.app')"
+              echo ""
+              echo "Please review the changes manually before proceeding."
+              exit 1
+            else
+              echo "✓ $PACKAGE_SCRIPT unchanged, continuing..."
+            fi
+          fi
+
+          # Check if .github/scripts/ files were modified
+          if [[ "$GITHUB_SCRIPTS_CHECK_NEEDED" == "true" ]]; then
+            SCRIPT_MODIFIED=false
+            for script in "${SYNC_SCRIPTS[@]}"; do
+              script_path="$SCRIPTS_DIR/$script"
+              if [[ -f "$script_path" ]]; then
+                NEW_HASH=$(git hash-object "$script_path")
+                CURRENT_HASH_VALUE="${SCRIPT_HASHES_CURRENT[$script]}"
+                if [[ "$CURRENT_HASH_VALUE" != "$NEW_HASH" ]]; then
+                  echo "❗ WARNING: $script_path has been modified by upstream"
+                  echo "Current hash: $CURRENT_HASH_VALUE"
+                  echo "New hash: $NEW_HASH"
+                  SCRIPT_MODIFIED=true
+                fi
+              fi
+            done
+
+            if [[ "$SCRIPT_MODIFIED" == "true" ]]; then
+              echo ""
+              echo "The following NAD-specific scripts may need review:"
+              echo "  - version-sync.py: NAD version management tool"
+              echo "  - Build scripts: NAD custom build configurations"
+              echo "  - Package scripts: NAD packaging customizations"
+              echo ""
+              echo "Please review all script changes manually before proceeding."
+              exit 1
+            else
+              echo "✓ All .github/scripts/ files unchanged, continuing..."
+            fi
+          fi
+
+          # Check if CMakePresets.json was modified
+          if [[ "$PRESETS_CHECK_NEEDED" == "true" ]]; then
+            NEW_PRESETS_HASH=$(git hash-object "$CMAKE_PRESETS")
+            if [[ "$CURRENT_PRESETS_HASH" != "$NEW_PRESETS_HASH" ]]; then
+              echo "❗ WARNING: $CMAKE_PRESETS has been modified by upstream"
+              echo "Current hash: $CURRENT_PRESETS_HASH"
+              echo "New hash: $NEW_PRESETS_HASH"
+              echo ""
+              echo "Please verify the following NAD customizations are preserved:"
+              echo "  - APP_DESTINATION with 'OBS Studio-no-aja.app'"
+              echo "  - OBS_BUNDLE with 'com.yourcompany.obs-no-aja'"
+              echo "  - VLC_BUNDLE with 'org.videolan.vlc-no-aja'"
+              echo "  - ENABLE_AJA disabled (set to OFF)"
+              echo ""
+              exit 1
+            else
+              echo "✓ $CMAKE_PRESETS unchanged, continuing..."
+            fi
+          fi
+
+          echo "Pushing sync commit to ${{ env.DEFAULT_BRANCH }}..."
+          git push origin "${{ env.DEFAULT_BRANCH }}"
+
+          echo "commit_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Save Version Info
+        run: |
+          echo '{"nad_version": "${{ steps.release_info.outputs.nad_version }}", "upstream_version": "${{ steps.release_info.outputs.upstream_version }}", "commit_sha": "${{ steps.merge.outputs.commit_sha }}"}' > version-info.json
+
+      - name: Upload Version Info
+        uses: actions/upload-artifact@v4
+        with:
+          name: version-info
+          path: version-info.json
+
+  build:
+    name: Build macOS
+    needs: sync
+    runs-on: [self-hosted, macOS, ARM64]
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      MACOSX_DEPLOYMENT_TARGET: 13.0
+      CMAKE_OSX_DEPLOYMENT_TARGET: 13.0
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [arm64, x86_64]
+        build_type: [no-aja, no-decklink]
+    defaults:
+      run:
+        shell: zsh --no-rcs --errexit --pipefail {0}
+    
+    steps:
+      - name: Checkout Synced Commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.commit_sha }}
+          submodules: recursive
+
+      - name: Set Up Environment
+        id: setup
+        run: |
+          echo "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer" >> $GITHUB_ENV
+          local -A arch_names=(x86_64 intel arm64 apple)
+          print "cpuName=${arch_names[${{ matrix.target }}]}" >> $GITHUB_OUTPUT
+
+      - name: Clean build artifacts
+        run: |
+          rm -rf build_macos
+          find . -name CMakeCache.txt -delete
+
+      - name: Debug deployment target env
+        run: |
+          env | sort | egrep 'MACOSX|OSX_DEPLOYMENT|CMAKE_OSX' || true
+
+      - name: Build OBS
+        env:
+          UPSTREAM_VERSION: ${{ needs.sync.outputs.upstream_version }}
+          BUILD_TYPE: ${{ matrix.build_type }}
+        run: |
+          # Set version override
+          VERSION_OVERRIDE="${UPSTREAM_VERSION}-${BUILD_TYPE}"
+          export OBS_VERSION_OVERRIDE="${VERSION_OVERRIDE}"
+
+          # Set CMake flags based on build type
+          if [[ "${BUILD_TYPE}" == "no-aja" ]]; then
+            export CMAKE_EXTRA_FLAGS="-DENABLE_AJA=OFF -DENABLE_DECKLINK=ON"
+          elif [[ "${BUILD_TYPE}" == "no-decklink" ]]; then
+            export CMAKE_EXTRA_FLAGS="-DENABLE_DECKLINK=OFF -DENABLE_AJA=ON"
+          fi
+
+          # Disable code signing
+          export CODESIGN_IDENT='-'
+
+          echo "Building OBS with BUILD_TYPE=${BUILD_TYPE}, VERSION=${VERSION_OVERRIDE}"
+          echo "CMake extra flags: ${CMAKE_EXTRA_FLAGS}"
+
+          # Call official build script
+          .github/scripts/build-macos \
+            --target macos-${{ matrix.target }} \
+            --config RelWithDebInfo
+
+      - name: Package OBS
+        env:
+          BUILD_TYPE: ${{ matrix.build_type }}
+        run: |
+          # Disable code signing
+          export CODESIGN_IDENT='-'
+
+          echo "Packaging OBS with BUILD_TYPE=${BUILD_TYPE}"
+
+          # Call official package script
+          .github/scripts/package-macos \
+            --target macos-${{ matrix.target }} \
+            --config RelWithDebInfo \
+            --package
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-studio-macos-${{ matrix.target }}-${{ matrix.build_type }}
+          path: build_macos/*.dmg

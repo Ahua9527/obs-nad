@@ -13,10 +13,11 @@ if (( ! # )) {
 local source=${1}
 local volume_name=${2}
 local output_name=${3}
+local temp_applescript=""
 
 log_group "Create macOS disk image"
 
-trap "safe_hdiutil detach /Volumes/${output_name}; rm temp.dmg; log_group; return 2" ERR
+trap '[[ -n ${temp_applescript:-} ]] && rm -f "${temp_applescript}"; safe_hdiutil detach "/Volumes/${output_name}"; rm -f temp.dmg; log_group; return 2' ERR
 
 safe_hdiutil() {
   local _status=0
@@ -61,7 +62,32 @@ log_info "Setting up disk volume..."
 log_status "Volume icon"
 SetFile -c icnC /Volumes/${output_name}/.VolumeIcon.icns
 log_status "Icon positions"
-osascript package.applescript ${output_name}
+
+# Use custom AppleScript path if provided, otherwise use default and rewrite placeholder to
+# the detected app bundle name in the source directory.
+local applescript_path="${APPLESCRIPT_PATH:-package.applescript}"
+if [[ -z ${APPLESCRIPT_PATH:-} && -f ${applescript_path} ]]; then
+  local app_bundle_name=""
+  for app_bundle in ${source}/*.app(N); do
+    app_bundle_name=${app_bundle:t}
+    break
+  done
+  if [[ -z ${app_bundle_name} ]]; then
+    log_warning "No .app bundle found under ${source}; using volume name for placeholder replacement."
+    app_bundle_name="${volume_name}.app"
+  fi
+
+  temp_applescript="$(mktemp "${TMPDIR:-/tmp}/package.applescript.XXXXXX")"
+  log_debug "Using app bundle name '${app_bundle_name}' to generate AppleScript ${temp_applescript:t}"
+  sed "s/APP_NAME_PLACEHOLDER/${app_bundle_name}/g" \
+    "${applescript_path}" > "${temp_applescript}"
+  applescript_path="${temp_applescript}"
+fi
+
+log_debug "Using AppleScript: ${applescript_path}"
+osascript "${applescript_path}" "${output_name}"
+[[ -n ${temp_applescript} ]] && rm -f "${temp_applescript}"
+
 log_status "File permissions"
 chmod -Rf go-w /Volumes/${output_name}
 SetFile -a C /Volumes/${output_name}

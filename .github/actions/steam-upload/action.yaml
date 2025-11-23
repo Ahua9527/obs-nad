@@ -52,28 +52,28 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Check Runner Operating System 🏃‍♂️
+    - name: Check Runner Operating System
       if: runner.os != 'macOS'
       shell: bash
       run: |
-        : Check Runner Operating System 🏃‍♂️
+        : Check Runner Operating System
         echo '::error::steam-upload action requires a macOS-based runner.'
         exit 2
 
-    - name: Check GitHub Event 🔬
+    - name: Check GitHub Event
       if: contains(fromJSON('["release", "workflow_dispatch", "schedule"]'), github.event_name) != true
       shell: zsh --no-rcs --errexit --pipefail {0}
       run: |
-        : Check GitHub Event 🔬
+        : Check GitHub Event
         print "::error:steam-upload action can only be used with 'release', 'workflow-dispatch', or 'schedule' events."
         exit 2
 
-    - name: Download Nightly Assets 🌙
+    - name: Download Nightly Assets
       id: asset-info-nightly
       uses: actions/download-artifact@v4
       if: github.event_name == 'schedule'
 
-    - name: Download Assets 📥
+    - name: Download Assets
       id: asset-info
       shell: zsh --no-rcs --errexit --pipefail {0}
       env:
@@ -82,7 +82,7 @@ runs:
         macos_apple_custom_asset: ${{ inputs.customAssetMacOSApple }}
         macos_intel_custom_asset: ${{ inputs.customAssetMacOSIntel }}
       run: |
-        : Download Assets 📥
+        : Download Assets
         if (( ${+RUNNER_DEBUG} )) setopt XTRACE
 
         local root_dir="${PWD}"
@@ -157,10 +157,10 @@ runs:
         print "description=${description}" >> $GITHUB_OUTPUT
         print "is_prerelease=${is_prerelease}" >> $GITHUB_OUTPUT
 
-    - name: Prepare Builds for Steam 🍜
+    - name: Prepare Builds for Steam
       shell: zsh --no-rcs --errexit --pipefail --extendedglob {0}
       run: |
-        : Prepare Builds for Steam 🍜
+        : Prepare Builds for Steam
         if (( ${+RUNNER_DEBUG} )) setopt XTRACE
 
         local root_dir="${PWD}"
@@ -177,39 +177,61 @@ runs:
         print '::endgroup::'
 
         print '::group::Prepare macOS Apple assets'
-        mkdir -p steam-macos/arm64/OBS.app
-        hdiutil attach -noverify -readonly -noautoopen -mountpoint /Volumes/obs-studio-arm64 ${root_dir}/(#i)obs-studio-*-macos-apple.dmg
-        ditto /Volumes/obs-studio-arm64/OBS.app steam-macos/arm64/OBS.app
+        hdiutil attach -noverify -readonly -noautoopen -mountpoint /Volumes/obs-studio-arm64 ${root_dir}/(#i)obs-studio-no-aja-*-macos-apple.dmg
+
+        # Detect app bundle name dynamically from the mounted DMG
+        local app_bundle_path=(/Volumes/obs-studio-arm64/OBS\ Studio-*.app(N[1]))
+        if [[ ${#app_bundle_path} -eq 0 ]]; then
+          print "::error::No OBS Studio app bundle found in /Volumes/obs-studio-arm64"
+          exit 1
+        fi
+
+        local app_bundle_name="${app_bundle_path:t}"
+        print "Detected app bundle: ${app_bundle_name}"
+
+        mkdir -p "steam-macos/arm64/${app_bundle_name}"
+        ditto "/Volumes/obs-studio-arm64/${app_bundle_name}" "steam-macos/arm64/${app_bundle_name}"
         hdiutil unmount /Volumes/obs-studio-arm64
-        rm ${root_dir}/(#i)obs-studio-*-macos-apple.dmg
+        rm ${root_dir}/(#i)obs-studio-no-aja-*-macos-apple.dmg
         print '::endgroup::'
 
         print '::group::Prepare macOS Intel assets'
-        mkdir -p steam-macos/x86_64/OBS.app
-        hdiutil attach -noverify -readonly -noautoopen -mountpoint /Volumes/obs-studio-x86_64 ${root_dir}/(#i)obs-studio-*-macos-intel.dmg
-        ditto /Volumes/obs-studio-x86_64/OBS.app steam-macos/x86_64/OBS.app
+        hdiutil attach -noverify -readonly -noautoopen -mountpoint /Volumes/obs-studio-x86_64 ${root_dir}/(#i)obs-studio-no-aja-*-macos-intel.dmg
+
+        # Detect app bundle name dynamically from the mounted DMG
+        app_bundle_path=(/Volumes/obs-studio-x86_64/OBS\ Studio-*.app(N[1]))
+        if [[ ${#app_bundle_path} -eq 0 ]]; then
+          print "::error::No OBS Studio app bundle found in /Volumes/obs-studio-x86_64"
+          exit 1
+        fi
+
+        app_bundle_name="${app_bundle_path:t}"
+        print "Detected app bundle: ${app_bundle_name}"
+
+        mkdir -p "steam-macos/x86_64/${app_bundle_name}"
+        ditto "/Volumes/obs-studio-x86_64/${app_bundle_name}" "steam-macos/x86_64/${app_bundle_name}"
         hdiutil unmount /Volumes/obs-studio-x86_64
-        rm ${root_dir}/(#i)obs-studio-*-macos-intel.dmg
+        rm ${root_dir}/(#i)obs-studio-no-aja-*-macos-intel.dmg
         print '::endgroup::'
 
         cp ${root_dir}/build-aux/steam/scripts_macos/launch.sh steam-macos/launch.sh
 
         popd
 
-    - name: Set Up steamcmd 🚂
+    - name: Set Up steamcmd
       uses: CyberAndrii/setup-steamcmd@29e114af032a947f5ed57832409070d6e4cbfce3
 
-    - name: Generate Steam auth code 🔐
+    - name: Generate Steam auth code
       id: steam-totp
       uses: CyberAndrii/steam-totp@45775c32193801a84d19d94076d72a2ece010948
       if: ${{ ! fromJSON(inputs.preview) }}
       with:
         shared_secret: ${{ inputs.steamSecret }}
 
-    - name: Upload to Steam 📤
+    - name: Upload to Steam
       shell: zsh --no-rcs --errexit --pipefail {0}
       run: |
-        : Upload to Steam 📤
+        : Upload to Steam
         if (( ${+RUNNER_DEBUG} )) setopt XTRACE
 
         local root_dir="${PWD}"
@@ -246,18 +268,18 @@ runs:
         print '::endgroup'
         popd
 
-    - name: Generate Steam auth code 🔐
+    - name: Generate Steam auth code
       id: steam-totp-playtest
       uses: CyberAndrii/steam-totp@45775c32193801a84d19d94076d72a2ece010948
       if: ${{ ! fromJSON(inputs.preview) && fromJSON(steps.asset-info.outputs.is_prerelease) }}
       with:
         shared_secret: ${{ inputs.steamSecret }}
 
-    - name: Upload to Steam (Playtest) 📤
+    - name: Upload to Steam (Playtest)
       if: fromJSON(steps.asset-info.outputs.is_prerelease)
       shell: zsh --no-rcs --errexit --pipefail {0}
       run: |
-        : Upload to Steam Playtest 📤
+        : Upload to Steam Playtest
         if (( ${+RUNNER_DEBUG} )) setopt XTRACE
 
         local root_dir="${PWD}"
