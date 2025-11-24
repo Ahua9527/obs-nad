@@ -48,30 +48,52 @@ static inline bool is_individual_audio_source(obs_source_t *source)
 	       !(source->info.output_flags & OBS_SOURCE_COMPOSITE);
 }
 
+extern bool devices_match(const char *id1, const char *id2);
+
 static inline void check_audio_output_source_is_monitoring_device(obs_source_t *s, void *p)
 {
 	struct obs_core_audio *audio = p;
 	if (!audio->monitoring_device_name)
 		return;
 
-	if (strcmp(s->info.id, "wasapi_output_capture") == 0 || strcmp(s->info.id, "pulse_output_capture") == 0 ||
-	    strcmp(s->info.id, "coreaudio_output_capture") == 0) {
-		const char *dev_id = NULL;
-		obs_data_t *settings = obs_source_get_settings(s);
-		if (settings) {
-			dev_id = obs_data_get_string(settings, "device_id");
-			if (strcmp(dev_id, audio->monitoring_device_id) == 0) {
-				audio->prevent_monitoring_duplication = true;
-				audio->monitoring_duplicating_source = s;
-				if (!audio->monitoring_duplication_prevented_on_prev_tick)
-					blog(LOG_INFO,
-					     "Device for 'Audio Output Capture' source is also used for audio"
-					     " monitoring:\nDeduplication logic is being applied to all monitored"
-					     " sources.\n");
-			}
-			obs_data_release(settings);
-		}
+	const char *id = s->info.id;
+	if (strcmp(id, "wasapi_output_capture") != 0 && strcmp(id, "pulse_output_capture") != 0 &&
+	    strcmp(id, "coreaudio_output_capture") != 0)
+		return;
+
+	obs_data_t *settings = obs_source_get_settings(s);
+	if (!settings)
+		return;
+
+	const char *device_id = obs_data_get_string(settings, "device_id");
+	const char *mon_id = audio->monitoring_device_id;
+	bool id_match = false;
+
+#ifdef __APPLE__
+	extern void get_desktop_default_id(char **p_id);
+	if (device_id && strcmp(device_id, "default") == 0) {
+		char *def_id = NULL;
+		get_desktop_default_id(&def_id);
+		id_match = devices_match(def_id, mon_id);
+		if (def_id)
+			bfree(def_id);
+	} else {
+		id_match = devices_match(device_id, mon_id);
 	}
+#else
+	id_match = devices_match(device_id, mon_id);
+#endif
+
+	if (id_match) {
+		audio->prevent_monitoring_duplication = true;
+		audio->monitoring_duplicating_source = s;
+		if (!audio->monitoring_duplication_prevented_on_prev_tick)
+			blog(LOG_INFO, "Device for 'Audio Output Capture' source is also used for audio"
+				       " monitoring:\nDeduplication logic is being applied to all monitored"
+				       " sources.\n");
+	}
+
+	obs_data_release(settings);
 }
 
 /*
@@ -84,6 +106,9 @@ static inline void check_audio_output_source_is_monitoring_device(obs_source_t *
  */
 static void push_audio_tree2(obs_source_t *parent, obs_source_t *source, void *p)
 {
+	if (obs_source_removed(source))
+		return;
+
 	struct obs_core_audio *audio = p;
 	size_t idx = da_find(audio->render_order, &source, 0);
 
@@ -546,7 +571,8 @@ static inline bool should_silence_monitored_source(obs_source_t *source, struct 
 	if (!audio->monitoring_duplicating_source)
 		return false;
 
-	bool output_capture_unmuted = !audio->monitoring_duplicating_source->user_muted;
+	bool fader_muted = close_float(audio->monitoring_duplicating_source->volume, 0.0f, 0.0001f);
+	bool output_capture_unmuted = !audio->monitoring_duplicating_source->user_muted && !fader_muted;
 
 	if (audio->prevent_monitoring_duplication && output_capture_unmuted) {
 		if (source->monitoring_type == OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT &&
@@ -557,13 +583,22 @@ static inline bool should_silence_monitored_source(obs_source_t *source, struct 
 	return false;
 }
 
-static inline void clear_audio_output_buf(obs_source_t *source)
+static inline void clear_audio_output_buf(obs_source_t *source, struct obs_core_audio *audio)
 {
+	if (!audio->monitoring_duplicating_source)
+		return;
+
+	uint32_t aoc_mixers = audio->monitoring_duplicating_source->audio_mixers;
+	uint32_t source_mixers = source->audio_mixers;
+
 	for (size_t mix = 0; mix < MAX_AUDIO_MIXES; mix++) {
-		for (size_t ch = 0; ch < MAX_AUDIO_CHANNELS; ch++) {
-			float *buf = source->audio_output_buf[mix][ch];
-			if (buf)
-				memset(buf, 0, AUDIO_OUTPUT_FRAMES * sizeof(float));
+		uint32_t mix_and_val = (1 << mix);
+		if ((aoc_mixers & mix_and_val) && (source_mixers & mix_and_val)) {
+			for (size_t ch = 0; ch < MAX_AUDIO_CHANNELS; ch++) {
+				float *buf = source->audio_output_buf[mix][ch];
+				if (buf)
+					memset(buf, 0, AUDIO_OUTPUT_FRAMES * sizeof(float));
+			}
 		}
 	}
 }
@@ -614,6 +649,8 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 				continue;
 			if (!obs_source_active(source))
 				continue;
+			if (obs_source_removed(source))
+				continue;
 
 			/* first, add top - level sources as root_nodes */
 			if (obs->video.mixes.array[j]->mix_audio)
@@ -636,7 +673,9 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 
 	source = data->first_audio_source;
 	while (source) {
-		push_audio_tree(NULL, source, audio);
+		if (!obs_source_removed(source)) {
+			push_audio_tree(NULL, source, audio);
+		}
 		source = (struct obs_source *)source->next_audio_source;
 	}
 
@@ -648,7 +687,7 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 		obs_source_t *source = audio->render_order.array[i];
 		obs_source_audio_render(source, mixers, channels, sample_rate, audio_size);
 		if (should_silence_monitored_source(source, audio))
-			clear_audio_output_buf(source);
+			clear_audio_output_buf(source, audio);
 
 		/* if a source has gone backward in time and we can no
 		 * longer buffer, drop some or all of its audio */
