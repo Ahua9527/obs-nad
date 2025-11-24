@@ -1,0 +1,98 @@
+name: Create Release
+
+on:
+  workflow_run:
+    workflows: ["Sync and Build"]
+    types:
+      - completed
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Draft Release
+    runs-on: ubuntu-24.04
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - name: Download Version Info
+        uses: actions/download-artifact@v4
+        with:
+          name: version-info
+          path: ./
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Load Version Info
+        id: run_data
+        run: |
+          cat version-info.json
+          {
+            echo "nad_version=$(jq -r .nad_version version-info.json)"
+            echo "upstream_version=$(jq -r .upstream_version version-info.json)"
+            echo "commit_sha=$(jq -r .commit_sha version-info.json)"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.run_data.outputs.commit_sha }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+          path: artifacts/
+
+      - name: Get Upstream Release Info
+        id: upstream_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh api repos/obsproject/obs-studio/releases/tags/v${{ steps.run_data.outputs.upstream_version }} --silent 2>/dev/null; then
+            is_prerelease=$(gh api repos/obsproject/obs-studio/releases/tags/v${{ steps.run_data.outputs.upstream_version }} --jq .prerelease)
+            echo "is_prerelease=${is_prerelease}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Upstream tag not found, assuming not a prerelease"
+            echo "is_prerelease=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Generate Release Body and Checksums
+        run: |
+          UPSTREAM_VERSION="${{ steps.run_data.outputs.upstream_version }}"
+
+          {
+            echo "See upstream release notes for the changelog:"
+            echo "https://github.com/obsproject/obs-studio/releases/tag/v${UPSTREAM_VERSION}"
+            echo ""
+            echo "**Note: This is an unsigned build.**"
+            echo ""
+            echo "> To run this application on macOS, you may need to right-click (or Ctrl-click) the OBS icon inside the DMG and select \"Open\"."
+            echo ""
+            echo "### Checksums"
+            echo '```'
+          } > CHECKSUMS.txt
+
+          find artifacts -type f \( -name "*.dmg" -o -name "*.zip" \) -exec sha256sum {} + >> CHECKSUMS.txt
+          echo '```' >> CHECKSUMS.txt
+
+      - name: Create and Push Tag
+        run: |
+          set -euo pipefail
+          NAD_VERSION="${{ steps.run_data.outputs.nad_version }}"
+          git config user.name "NAD Sync Bot"
+          git config user.email "noreply@github.com"
+          git tag -a "${NAD_VERSION}" -m "Release ${NAD_VERSION}" "${{ steps.run_data.outputs.commit_sha }}"
+          git push origin "${NAD_VERSION}"
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.run_data.outputs.nad_version }}
+          name: OBS Studio ${{ steps.run_data.outputs.nad_version }}
+          body_path: CHECKSUMS.txt
+          draft: false
+          prerelease: ${{ steps.upstream_release.outputs.is_prerelease }}
+          files: |
+            artifacts/**/*.dmg
