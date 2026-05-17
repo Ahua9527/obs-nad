@@ -17,7 +17,7 @@ setopt FUNCTION_ARGZERO
 #setopt XTRACE
 
 if (( ! ${+CI} )) {
-  print -u2 -PR "%F{1}    ✖︎ ${ZSH_ARGZERO:t:r} requires CI environment.%f"
+  print -u2 -PR "%F{1}    ✖ ${ZSH_ARGZERO:t:r} requires CI environment.%f"
   exit 1
 }
 
@@ -27,7 +27,7 @@ autoload -Uz is-at-least && if ! is-at-least 5.9; then
 fi
 
 TRAPZERR() {
-  print -u2 -PR "::error::%F{1}    ✖︎ script execution error.%f"
+  print -u2 -PR "::error::%F{1}    ✖ script execution error.%f"
   print -PR -e "
   Callstack:
   ${(j:\n     :)funcfiletrace}
@@ -42,7 +42,7 @@ build() {
   local project_root=${SCRIPT_HOME:A:h:h}
 
   fpath=(${SCRIPT_HOME}/utils.zsh ${fpath})
-  autoload -Uz log_group log_error log_output check_${host_os}
+  autoload -Uz log_group log_error log_info log_output check_${host_os}
 
   local -i debug=0
 
@@ -99,6 +99,12 @@ build() {
 
   check_${host_os}
 
+  : ${MACOSX_DEPLOYMENT_TARGET:=13.0}
+  export MACOSX_DEPLOYMENT_TARGET
+  if [[ -z ${CMAKE_OSX_DEPLOYMENT_TARGET:-} ]]; then
+    export CMAKE_OSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET}
+  fi
+
   if [[ ${host_os} == ubuntu ]] {
     autoload -Uz setup_ubuntu setup_ccache
     setup_ccache
@@ -117,13 +123,20 @@ build() {
 
   case ${target} {
     macos-*)
-      cmake_args+=(
-        --preset 'macos-ci'
-        -DCMAKE_OSX_ARCHITECTURES:STRING=${target##*-}
-      )
+      cmake_args+=(--preset 'macos-ci' -DCMAKE_OSX_ARCHITECTURES:STRING=${target##*-} -DENABLE_CCACHE:BOOL=OFF)
+
+      if [[ -n ${OBS_VERSION_OVERRIDE:-} ]] {
+        cmake_args+=(-DOBS_VERSION_OVERRIDE:STRING="${OBS_VERSION_OVERRIDE}")
+      }
+
+      # Support additional CMake flags from environment variable
+      if [[ -n ${CMAKE_EXTRA_FLAGS:-} ]] {
+        log_info "Adding extra CMake flags: ${CMAKE_EXTRA_FLAGS}"
+        cmake_args+=(${(z)CMAKE_EXTRA_FLAGS})
+      }
 
       if (( debug )) {
-        cmake_args+=(CMAKE_XCODE_ATTRIBUTE_COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS:STRING=YES)
+        cmake_args+=(-DCMAKE_XCODE_ATTRIBUTE_COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS:STRING=YES)
       }
 
       typeset -gx NSUnbufferedIO=YES
@@ -148,6 +161,11 @@ build() {
           }
         }
       }
+
+      local -a xc_env=(
+        MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET}
+        SDKROOT=macosx
+      )
 
       local -a build_args=(
         ONLY_ACTIVE_ARCH=NO
@@ -194,11 +212,11 @@ build() {
       if (( analyze )) {
         run_xcodebuild ${analyze_args}
       } else {
-        if [[ ${GITHUB_EVENT_NAME} == push && ${GITHUB_REF_NAME} =~ [0-9]+.[0-9]+.[0-9]+(-(rc|beta).+)? ]] {
-          run_xcodebuild ${archive_args}
-          run_xcodebuild ${export_args}
+        if (( codesign )) && [[ ${GITHUB_EVENT_NAME} == push && ${GITHUB_REF_NAME} =~ [0-9]+.[0-9]+.[0-9]+(-(rc|beta).+)? ]] {
+          run_xcodebuild ${xc_env} ${archive_args}
+          run_xcodebuild ${xc_env} ${export_args}
         } else {
-          run_xcodebuild ${build_args}
+          run_xcodebuild ${xc_env} ${build_args}
 
           rm -rf OBS.app
           mkdir OBS.app
@@ -214,6 +232,10 @@ build() {
         -DENABLE_BROWSER:BOOL=ON
         -DCEF_ROOT_DIR:PATH="${project_root}/.deps/cef_binary_${CEF_VERSION}_${target//ubuntu-/linux_}"
       )
+
+      if [[ -n ${OBS_VERSION_OVERRIDE:-} ]] {
+        cmake_args+=(-DOBS_VERSION_OVERRIDE:STRING="${OBS_VERSION_OVERRIDE}")
+      }
 
       cmake_build_args+=(build_${target%%-*} --config ${config} --parallel)
       cmake_install_args+=(build_${target%%-*} --prefix ${project_root}/build_${target%%-*}/install/${config})
