@@ -50,13 +50,25 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if gh api repos/obsproject/obs-studio/releases/tags/v${{ steps.run_data.outputs.upstream_version }} --silent 2>/dev/null; then
-            is_prerelease=$(gh api repos/obsproject/obs-studio/releases/tags/v${{ steps.run_data.outputs.upstream_version }} --jq .prerelease)
-            echo "is_prerelease=${is_prerelease}" >> "${GITHUB_OUTPUT}"
+          set -euo pipefail
+
+          upstream_version="${{ steps.run_data.outputs.upstream_version }}"
+          release_json=""
+
+          for tag_name in "${upstream_version}" "v${upstream_version}"; do
+            if release_json=$(gh api "repos/obsproject/obs-studio/releases/tags/${tag_name}" 2>/dev/null); then
+              break
+            fi
+          done
+
+          if [[ -n "${release_json}" ]]; then
+            is_prerelease=$(jq -r .prerelease <<< "${release_json}")
           else
             echo "Upstream tag not found, assuming not a prerelease"
-            echo "is_prerelease=false" >> "${GITHUB_OUTPUT}"
+            is_prerelease=false
           fi
+
+          echo "is_prerelease=${is_prerelease}" >> "${GITHUB_OUTPUT}"
 
       - name: Generate Release Body and Checksums
         run: |
@@ -64,7 +76,7 @@ jobs:
 
           {
             echo "See upstream release notes for the changelog:"
-            echo "https://github.com/obsproject/obs-studio/releases/tag/v${UPSTREAM_VERSION}"
+            echo "https://github.com/obsproject/obs-studio/releases/tag/${UPSTREAM_VERSION}"
             echo ""
             echo "**Note: This is an unsigned build.**"
             echo ""
@@ -78,13 +90,22 @@ jobs:
           echo '```' >> CHECKSUMS.txt
 
       - name: Create and Push Tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           NAD_VERSION="${{ steps.run_data.outputs.nad_version }}"
           git config user.name "NAD Sync Bot"
           git config user.email "noreply@github.com"
-          git tag -a "${NAD_VERSION}" -m "Release ${NAD_VERSION}" "${{ steps.run_data.outputs.commit_sha }}"
-          git push origin "${NAD_VERSION}"
+
+          if gh release view "${NAD_VERSION}" >/dev/null 2>&1; then
+            gh release delete "${NAD_VERSION}" --yes --cleanup-tag
+          elif git ls-remote --exit-code --tags origin "refs/tags/${NAD_VERSION}" >/dev/null 2>&1; then
+            git push --delete origin "${NAD_VERSION}"
+          fi
+
+          git tag -f -a "${NAD_VERSION}" -m "Release ${NAD_VERSION}" "${{ steps.run_data.outputs.commit_sha }}"
+          git push --force origin "${NAD_VERSION}"
 
       - name: Publish Release
         uses: softprops/action-gh-release@v2

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       upstream_version:
-        description: 'Upstream version tag to sync and build (e.g., 32.0.2)'
+        description: 'Upstream version tag to sync and build (e.g., 32.1.2)'
         required: true
         type: string
 
@@ -66,7 +66,20 @@ jobs:
           git checkout "${DEFAULT_BRANCH}"
           git reset --hard "origin/${DEFAULT_BRANCH}"
 
-          echo "Merging upstream tag v${UPSTREAM_VERSION} with protected files..."
+          tag_ref=""
+          for candidate in "refs/tags/${UPSTREAM_VERSION}" "refs/tags/v${UPSTREAM_VERSION}"; do
+            if git rev-parse --verify --quiet "${candidate}" >/dev/null; then
+              tag_ref="${candidate}"
+              break
+            fi
+          done
+
+          if [[ -z "${tag_ref}" ]]; then
+            echo "::error::Upstream tag ${UPSTREAM_VERSION} was not found."
+            exit 1
+          fi
+
+          echo "Merging upstream tag ${tag_ref} with protected files..."
           git config merge.ours.driver true
 
           cat > .git/info/attributes << EOF
@@ -137,7 +150,7 @@ jobs:
             echo "Will check for changes after merge..."
           fi
 
-          git merge --no-ff --commit -m "feat: sync with upstream v${UPSTREAM_VERSION}" "refs/tags/v${UPSTREAM_VERSION}" || {
+          git merge --no-ff --commit -m "feat: sync with upstream ${UPSTREAM_VERSION}" "${tag_ref}" || {
             echo "Merge conflict detected, resolving with protected files..."
             git checkout --ours .github/workflows/ 2>/dev/null || true
             git checkout --ours build-aux/steam/scripts_macos/launch.sh 2>/dev/null || true
@@ -223,10 +236,9 @@ jobs:
               echo "New hash: $NEW_PRESETS_HASH"
               echo ""
               echo "Please verify the following NAD customizations are preserved:"
-              echo "  - APP_DESTINATION with 'OBS Studio-no-aja.app'"
-              echo "  - OBS_BUNDLE with 'com.yourcompany.obs-no-aja'"
-              echo "  - VLC_BUNDLE with 'org.videolan.vlc-no-aja'"
               echo "  - ENABLE_AJA disabled (set to OFF)"
+              echo "  - ENABLE_DECKLINK disabled (set to OFF)"
+              echo "  - macOS CI remains on the Xcode compilation cache preset"
               echo ""
               exit 1
             else
@@ -254,32 +266,49 @@ jobs:
     needs: sync
     runs-on: macos-15
     env:
-      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_26.1.app/Contents/Developer
       MACOSX_DEPLOYMENT_TARGET: 13.0
       CMAKE_OSX_DEPLOYMENT_TARGET: 13.0
       OBS_COMPILE_DEPRECATION_AS_WARNING: ON
+      CMAKE_EXTRA_FLAGS: -DENABLE_AJA=OFF -DENABLE_DECKLINK=OFF
     strategy:
       fail-fast: false
       matrix:
         target: [arm64, x86_64]
-        build_type: [no-aja, no-decklink]
+        build_type: [no-aja]
     defaults:
       run:
         shell: zsh --no-rcs --errexit --pipefail {0}
     
     steps:
       - name: Checkout Synced Commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: ${{ needs.sync.outputs.commit_sha }}
           submodules: recursive
+          fetch-depth: 0
 
       - name: Set Up Environment
         id: setup
         run: |
-          echo "DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer" >> $GITHUB_ENV
+          print '::group::Enable Xcode 26.1'
+          sudo xcode-select --switch /Applications/Xcode_26.1.app/Contents/Developer
+          print '::endgroup::'
+
           local -A arch_names=(x86_64 intel arm64 apple)
           print "cpuName=${arch_names[${{ matrix.target }}]}" >> $GITHUB_OUTPUT
+
+          local xcode_cas_path="${HOME}/Library/Developer/Xcode/DerivedData/CompilationCache.noindex"
+          if ! [[ -d ${xcode_cas_path} ]] mkdir -p ${xcode_cas_path}
+          print "xcodeCasPath=${xcode_cas_path}" >> $GITHUB_OUTPUT
+
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: xcode-cache
+        with:
+          path: ${{ steps.setup.outputs.xcodeCasPath }}
+          key: ${{ runner.os }}-xcode-${{ matrix.target }}-RelWithDebInfo
+          restore-keys: |
+            ${{ runner.os }}-xcode-${{ matrix.target }}-
 
       - name: Clean build artifacts
         run: |
@@ -294,17 +323,13 @@ jobs:
         env:
           UPSTREAM_VERSION: ${{ needs.sync.outputs.upstream_version }}
           BUILD_TYPE: ${{ matrix.build_type }}
+          XCODE_CAS_PATH: ${{ steps.setup.outputs.xcodeCasPath }}
         run: |
           # Set version override
           VERSION_OVERRIDE="${UPSTREAM_VERSION}-${BUILD_TYPE}"
           export OBS_VERSION_OVERRIDE="${VERSION_OVERRIDE}"
 
-          # Set CMake flags based on build type
-          if [[ "${BUILD_TYPE}" == "no-aja" ]]; then
-            export CMAKE_EXTRA_FLAGS="-DENABLE_AJA=OFF -DENABLE_DECKLINK=ON"
-          elif [[ "${BUILD_TYPE}" == "no-decklink" ]]; then
-            export CMAKE_EXTRA_FLAGS="-DENABLE_DECKLINK=OFF -DENABLE_AJA=ON"
-          fi
+          export CMAKE_EXTRA_FLAGS="-DENABLE_AJA=OFF -DENABLE_DECKLINK=OFF"
 
           # Disable code signing
           export CODESIGN_IDENT='-'
@@ -333,7 +358,13 @@ jobs:
             --package
 
       - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: obs-studio-macos-${{ matrix.target }}-${{ matrix.build_type }}
           path: build_macos/*.dmg
+
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: github.event_name != 'pull_request' && steps.xcode-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ steps.setup.outputs.xcodeCasPath }}
+          key: ${{ runner.os }}-xcode-${{ matrix.target }}-RelWithDebInfo

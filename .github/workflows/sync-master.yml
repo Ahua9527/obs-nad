@@ -204,10 +204,9 @@ jobs:
               echo "New hash: $NEW_PRESETS_HASH"
               echo ""
               echo "Please verify the following NAD customizations are preserved:"
-              echo "  - APP_DESTINATION with 'OBS Studio-no-aja.app'"
-              echo "  - OBS_BUNDLE with 'com.yourcompany.obs-no-aja'"
-              echo "  - VLC_BUNDLE with 'org.videolan.vlc-no-aja'"
               echo "  - ENABLE_AJA disabled (set to OFF)"
+              echo "  - ENABLE_DECKLINK disabled (set to OFF)"
+              echo "  - macOS CI remains on the Xcode compilation cache preset"
               echo ""
               exit 1
             else

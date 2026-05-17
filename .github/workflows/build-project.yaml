@@ -19,7 +19,7 @@ jobs:
       nadVersion: ${{ steps.setup.outputs.nadVersion }}
       versionPayload: ${{ steps.setup.outputs.versionPayload }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
       - name: Check Event Data
@@ -170,12 +170,12 @@ jobs:
     name: macOS
     runs-on: macos-15
     needs: check-event
-    # NAD: 始终构建 macOS，包括标签推送时
     env:
-      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_26.1.app/Contents/Developer
       MACOSX_DEPLOYMENT_TARGET: 13.0
       CMAKE_OSX_DEPLOYMENT_TARGET: 13.0
       OBS_COMPILE_DEPRECATION_AS_WARNING: ON
+      CMAKE_EXTRA_FLAGS: -DENABLE_AJA=OFF -DENABLE_DECKLINK=OFF
     strategy:
       fail-fast: false
       matrix:
@@ -184,7 +184,7 @@ jobs:
       run:
         shell: zsh --no-rcs --errexit --pipefail {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           submodules: recursive
           fetch-depth: 0
@@ -195,8 +195,8 @@ jobs:
           : Set Up Environment
           if (( ${+RUNNER_DEBUG} )) setopt XTRACE
 
-          print '::group::Select Xcode (no sudo)'
-          echo "DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer" >> $GITHUB_ENV
+          print '::group::Enable Xcode 26.1'
+          sudo xcode-select --switch /Applications/Xcode_26.1.app/Contents/Developer
           print '::endgroup::'
 
           print '::group::Clean Homebrew Environment'
@@ -212,22 +212,19 @@ jobs:
           local -A arch_names=(x86_64 intel arm64 apple)
           print "cpuName=${arch_names[${{ matrix.target }}]}" >> $GITHUB_OUTPUT
 
-      - name: Clean build artifacts
-        run: |
-          rm -rf build_macos
-          find . -name CMakeCache.txt -delete
+          local xcode_cas_path="${HOME}/Library/Developer/Xcode/DerivedData/CompilationCache.noindex"
 
-      - name: Debug deployment target env
-        run: |
-          env | sort | egrep 'MACOSX|OSX_DEPLOYMENT|CMAKE_OSX' || true
+          if ! [[ -d ${xcode_cas_path} ]] mkdir -p ${xcode_cas_path}
 
-      - uses: actions/cache/restore@v4
-        id: ccache-cache
+          print "xcodeCasPath=${xcode_cas_path}" >> $GITHUB_OUTPUT
+
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: xcode-cache
         with:
-          path: ${{ github.workspace }}/.ccache
-          key: ${{ runner.os }}-ccache-${{ matrix.target }}-${{ needs.check-event.outputs.config }}
+          path: ${{ steps.setup.outputs.xcodeCasPath }}
+          key: ${{ runner.os }}-xcode-${{ matrix.target }}-${{ needs.check-event.outputs.config }}
           restore-keys: |
-            ${{ runner.os }}-ccache-${{ matrix.target }}-
+            ${{ runner.os }}-xcode-${{ matrix.target }}-
 
       # NAD: 跳过代码签名设置（无证书）
       # - name: Set Up Code Signing 🔑
@@ -246,6 +243,7 @@ jobs:
           YOUTUBE_CLIENTID_HASH: ${{ secrets.YOUTUBE_CLIENTID_HASH }}
           YOUTUBE_SECRET: ${{ secrets.YOUTUBE_SECRET }}
           YOUTUBE_SECRET_HASH: ${{ secrets.YOUTUBE_SECRET_HASH }}
+          XCODE_CAS_PATH: ${{ steps.setup.outputs.xcodeCasPath }}
         with:
           target: ${{ matrix.target }}
           config: ${{ needs.check-event.outputs.config }}
@@ -269,24 +267,24 @@ jobs:
           codesignUser: ''
           codesignPass: ''
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+      - name: Upload Artifacts 📡
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: obs-studio-macos-${{ matrix.target }}-${{ needs.check-event.outputs.commitHash }}
           path: ${{ github.workspace }}/build_macos/obs-studio-*-macos-${{ steps.setup.outputs.cpuName }}.*
 
-      - name: Upload Debug Symbol Artifacts
-        uses: actions/upload-artifact@v4
+      - name: Upload Debug Symbol Artifacts 🪲
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ needs.check-event.outputs.config == 'Release' }}
         with:
           name: obs-studio-macos-${{ matrix.target }}-${{ needs.check-event.outputs.commitHash }}-dSYMs
           path: ${{ github.workspace }}/build_macos/obs-studio-*-macos-${{ steps.setup.outputs.cpuName }}-dSYMs.tar.xz
 
-      - uses: actions/cache/save@v4
-        if: github.event_name != 'pull_request' && steps.ccache-cache.outputs.cache-hit != 'true'
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: github.event_name != 'pull_request' && steps.xcode-cache.outputs.cache-hit != 'true'
         with:
-          path: ${{ github.workspace }}/.ccache
-          key: ${{ runner.os }}-ccache-${{ matrix.target }}-${{ needs.check-event.outputs.config }}
+          path: ${{ steps.setup.outputs.xcodeCasPath }}
+          key: ${{ runner.os }}-xcode-${{ matrix.target }}-${{ needs.check-event.outputs.config }}
 
   ubuntu-build:
     name: Ubuntu
@@ -302,7 +300,7 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         id: ccache-cache
         with:
           path: ${{ github.workspace }}/.ccache
@@ -332,26 +330,26 @@ jobs:
           config: ${{ needs.check-event.outputs.config }}
           package: ${{ fromJSON(needs.check-event.outputs.package) }}
 
-      - name: Upload Source Tarball
-        uses: actions/upload-artifact@v4
+      - name: Upload Source Tarball 🗜️
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: obs-studio-ubuntu-sources-${{ needs.check-event.outputs.commitHash }}
           path: ${{ github.workspace }}/build_ubuntu/obs-studio-*-sources.*
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+      - name: Upload Artifacts 📡
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: obs-studio-ubuntu-x86_64-${{ needs.check-event.outputs.commitHash }}
           path: ${{ github.workspace }}/build_ubuntu/obs-studio-*-x86_64-ubuntu-gnu.*
 
-      - name: Upload Debug Symbol Artifacts
-        uses: actions/upload-artifact@v4
+      - name: Upload Debug Symbol Artifacts 🪲
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ fromJSON(needs.check-event.outputs.package) }}
         with:
           name: obs-studio-ubuntu-x86_64-${{ needs.check-event.outputs.commitHash }}-dbgsym
           path: ${{ github.workspace }}/build_ubuntu/obs-studio-*-x86_64-ubuntu-gnu-dbgsym.ddeb
 
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         if: github.event_name != 'pull_request' && steps.ccache-cache.outputs.cache-hit != 'true'
         with:
           path: ${{ github.workspace }}/.ccache
@@ -368,10 +366,47 @@ jobs:
     env:
       FLATPAK_BUILD_SHARE_PATH: flatpak_app/files/share
     container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:kde-6.8
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
       options: --privileged
     steps:
-      - uses: actions/checkout@v4
+      - name: Prepare build space
+        shell: bash
+        run: |
+          : Prepare build space
+
+          echo ::group::Available storage
+          df -h
+          echo ::endgroup::
+
+          echo ::group::Remove Android stuff
+          rm -rf /to_clean/android/*
+          echo ::endgroup::
+
+          echo ::group::Remove CodeQL stuff
+          rm -rf /to_clean/codeql/*
+          echo ::endgroup::
+
+          echo ::group::Remove GHCup stuff
+          rm -rf /to_clean/ghcup/*
+          echo ::endgroup::
+
+          echo ::group::Remove Python stuff
+          rm -rf /to_clean/python/*
+          echo ::endgroup::
+
+          echo ::group::Remove Swift stuff
+          rm -rf /to_clean/swift/*
+          echo ::endgroup::
+
+          echo ::group::Remove .NET stuff
+          rm -rf /to_clean/dotnet/*
+          echo ::endgroup::
+
+          echo ::group::Available storage
+          df -h
+          echo ::endgroup::
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           submodules: recursive
           fetch-depth: 0
@@ -387,7 +422,7 @@ jobs:
 
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 
-          cache_key='flatpak-builder-${{ hashFiles('build-aux/**/*.json') }}'
+          cache_key='flatpak-builder-${{ hashFiles('build-aux/com.obsproject.Studio.json') }}'
           cache_ref='master'
           read -r id key size unit created accessed <<< \
             "$(gh cache list --ref "refs/heads/${cache_ref}" --key "${cache_key}-x86_64" | head -1)"
@@ -406,7 +441,7 @@ jobs:
           artifact: manifest
           path: build-aux/com.obsproject.Studio.json
 
-      - name: Build Flatpak Manifest
+      - name: Build Flatpak Manifest 🧾
         uses: flatpak/flatpak-github-actions/flatpak-builder@b8a638469ea7ec62844d7b6e487b697e6f249576
         with:
           build-bundle: ${{ fromJSON(needs.check-event.outputs.package) }}
@@ -454,7 +489,7 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           submodules: recursive
           fetch-depth: 0
@@ -482,8 +517,8 @@ jobs:
           config: ${{ needs.check-event.outputs.config }}
           package: ${{ fromJSON(needs.check-event.outputs.package) }}
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+      - name: Upload Artifacts 📡
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: obs-studio-windows-${{ matrix.architecture }}-${{ needs.check-event.outputs.commitHash }}
           path: ${{ github.workspace }}/build_${{ matrix.architecture }}/obs-studio-*-windows-${{ matrix.architecture }}.zip

@@ -107,8 +107,8 @@ runs:
         git fetch origin --no-tags --no-recurse-submodules -q
         .github/scripts/Build-Windows.ps1 @BuildArgs
 
-    - name: Create Summary
-      if: contains(fromJSON('["Linux", "macOS"]'), runner.os)
+    - name: Create Summary 📊
+      if: runner.os == 'Linux'
       shell: zsh --no-rcs --errexit --pipefail {0}
       run: |
         : Create Summary

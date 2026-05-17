@@ -40,15 +40,9 @@ build() {
   if (( ! ${+SCRIPT_HOME} )) typeset -g SCRIPT_HOME=${ZSH_ARGZERO:A:h}
   local host_os=${${(s:-:)ZSH_ARGZERO:t:r}[2]}
   local project_root=${SCRIPT_HOME:A:h:h}
-  local buildspec_file=${project_root}/buildspec.json
 
   fpath=(${SCRIPT_HOME}/utils.zsh ${fpath})
-  autoload -Uz log_group log_error log_output check_${host_os} setup_ccache
-
-  if [[ ! -r ${buildspec_file} ]] {
-    log_error 'Missing buildspec.json in project checkout.'
-    return 2
-  }
+  autoload -Uz log_group log_error log_info log_output check_${host_os}
 
   local -i debug=0
 
@@ -104,20 +98,20 @@ build() {
   set -- ${(@)args}
 
   check_${host_os}
-  # Enforce a single deployment target to avoid mixed values leaking from env
+
   : ${MACOSX_DEPLOYMENT_TARGET:=13.0}
   export MACOSX_DEPLOYMENT_TARGET
   if [[ -z ${CMAKE_OSX_DEPLOYMENT_TARGET:-} ]]; then
     export CMAKE_OSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET}
   fi
-  setup_ccache
 
   if [[ ${host_os} == ubuntu ]] {
-    autoload -Uz setup_ubuntu && setup_ubuntu
+    autoload -Uz setup_ubuntu setup_ccache
+    setup_ccache
+    setup_ubuntu
   }
 
-  local product_name
-  read -r product_name <<< "$(jq -r '.name' ${buildspec_file})"
+  local product_name='obs-studio'
 
   pushd ${project_root}
 
@@ -139,6 +133,10 @@ build() {
       if [[ -n ${CMAKE_EXTRA_FLAGS:-} ]] {
         log_info "Adding extra CMake flags: ${CMAKE_EXTRA_FLAGS}"
         cmake_args+=(${(z)CMAKE_EXTRA_FLAGS})
+      }
+
+      if (( debug )) {
+        cmake_args+=(-DCMAKE_XCODE_ATTRIBUTE_COMPILATION_CACHE_ENABLE_DIAGNOSTIC_REMARKS:STRING=YES)
       }
 
       typeset -gx NSUnbufferedIO=YES

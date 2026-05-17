@@ -740,6 +740,7 @@ extern obs_canvas_t *obs_create_main_canvas(void);
 extern void obs_canvas_destroy(obs_canvas_t *canvas);
 extern void obs_canvas_clear_mix(obs_canvas_t *canvas);
 extern void obs_free_canvas_mixes(void);
+extern bool obs_canvas_has_valid_video_info(obs_canvas_t *canvas);
 extern bool obs_canvas_reset_video_internal(obs_canvas_t *canvas, struct obs_video_info *ovi);
 extern void obs_canvas_insert_source(obs_canvas_t *canvas, obs_source_t *source);
 extern void obs_canvas_remove_source(obs_source_t *source);
@@ -1427,6 +1428,8 @@ struct obs_encoder {
 
 	/* stores the video/audio media output pointer.  video_t *or audio_t **/
 	void *media;
+	/* Stores the original video if GPU scaling is enabled and `media` can be overwritten. */
+	video_t *original_video;
 
 	pthread_mutex_t callbacks_mutex;
 	DARRAY(struct encoder_callback) callbacks;
