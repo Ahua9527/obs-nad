@@ -17,8 +17,6 @@ local temp_applescript=""
 
 log_group "Create macOS disk image"
 
-trap '[[ -n ${temp_applescript:-} ]] && rm -f "${temp_applescript}"; safe_hdiutil detach "/Volumes/${output_name}"; rm -f temp.dmg; log_group; return 2' ERR
-
 safe_hdiutil() {
   local _status=0
   local -r -a _backoff=(2 5 10 15 30)
@@ -41,6 +39,39 @@ safe_hdiutil() {
     return 2
   }
 }
+
+safe_detach() {
+  local mountpoint=${1}
+  local _status=0
+  local -r -a _backoff=(2 5 10 15 30)
+
+  for i ({1..5}) {
+    if [[ ! -d ${mountpoint} ]] {
+      log_status "Disk image already detached."
+      return 0
+    }
+
+    hdiutil detach "${mountpoint}" && _status=0 || _status=1
+
+    if (( _status )) {
+      if [[ ! -d ${mountpoint} ]] {
+        log_status "Disk image already detached."
+        return 0
+      }
+      log_warning "Unable to run 'hdiutil detach ${mountpoint}' (attempt #${i}). Retrying."
+      if (( ${+CI} )) sudo pkill -9 XProtect >/dev/null || true
+      sleep ${_backoff[${i}]}
+    } else {
+      return 0
+    }
+  }
+
+  log_error "Unable to run 'hdiutil detach ${mountpoint}'. Aborting"
+  log_group
+  return 2
+}
+
+trap '[[ -n ${temp_applescript:-} ]] && rm -f "${temp_applescript}"; safe_detach "/Volumes/${output_name}"; rm -f temp.dmg; log_group; return 2' ERR
 
 safe_hdiutil create \
   -volname "${volume_name}" \
@@ -94,7 +125,7 @@ SetFile -a C /Volumes/${output_name}
 rm -rf -- /Volumes/${output_name}/.fseventsd(N)
 log_info "Converting disk image..."
 
-safe_hdiutil detach /Volumes/${output_name}
+safe_detach /Volumes/${output_name}
 
 safe_hdiutil convert \
   -format ULFO \
