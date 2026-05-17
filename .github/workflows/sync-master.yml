@@ -106,7 +106,7 @@ jobs:
           python3 .github/scripts/nad-ci-guard.py validate
           git diff --check
 
-          git add -A -- CMakePresets.json build-aux/com.obsproject.Studio.json cmake/macos/resources/package.applescript .github
+          git add -A -- CMakePresets.json build-aux/com.obsproject.Studio.json cmake/macos/resources/package.applescript plugins/mac-virtualcam/CMakeLists.txt .github
           if ! git diff --cached --quiet; then
             git commit -m "ci: apply NAD invariants after upstream master sync"
           fi

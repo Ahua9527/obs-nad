@@ -137,7 +137,7 @@ jobs:
           python3 .github/scripts/nad-ci-guard.py validate
           git diff --check
 
-          git add -A -- .github CMakePresets.json build-aux/com.obsproject.Studio.json cmake/macos/resources/package.applescript
+          git add -A -- .github CMakePresets.json build-aux/com.obsproject.Studio.json cmake/macos/resources/package.applescript plugins/mac-virtualcam/CMakeLists.txt
           if ! git diff --cached --quiet; then
             git commit -m "ci: prepare NAD release ${UPSTREAM_VERSION}"
           fi

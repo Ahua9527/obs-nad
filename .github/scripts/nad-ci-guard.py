@@ -109,6 +109,22 @@ def apply_package_applescript() -> bool:
     return False
 
 
+def apply_mac_virtualcam() -> bool:
+    path = ROOT / "plugins" / "mac-virtualcam" / "CMakeLists.txt"
+    if not path.exists():
+        return False
+
+    text = path.read_text(encoding="utf-8")
+    updated = text.replace(
+        "\nadd_subdirectory(src/dal-plugin)\n",
+        "\n# add_subdirectory(src/dal-plugin)\n",
+    )
+    if updated != text:
+        path.write_text(updated, encoding="utf-8")
+        return True
+    return False
+
+
 def iter_tracked_text_files() -> Iterable[pathlib.Path]:
     result = subprocess.run(
         ["git", "ls-files"],
@@ -176,6 +192,15 @@ def check_package_applescript(errors: list[str]) -> None:
         errors.append(f"{rel(path)} missing APP_NAME_PLACEHOLDER")
 
 
+def check_mac_virtualcam(errors: list[str]) -> None:
+    path = ROOT / "plugins" / "mac-virtualcam" / "CMakeLists.txt"
+    if not path.exists():
+        return
+    text = path.read_text(encoding="utf-8")
+    if re.search(r"(?m)^add_subdirectory\(src/dal-plugin\)", text):
+        errors.append(f"{rel(path)} must not build the deprecated DAL plugin")
+
+
 def check_cmake_options(errors: list[str]) -> None:
     option_paths = {
         "ENABLE_AJA": ROOT / "plugins" / "aja" / "CMakeLists.txt",
@@ -225,6 +250,7 @@ def apply_invariants() -> int:
         apply_cmake_presets(),
         apply_flatpak_manifest(),
         apply_package_applescript(),
+        apply_mac_virtualcam(),
     ]
     print("NAD invariants applied." if any(changed) else "NAD invariants already satisfied.")
     return 0
@@ -237,6 +263,7 @@ def validate() -> int:
         check_cmake_presets,
         check_flatpak_manifest,
         check_package_applescript,
+        check_mac_virtualcam,
         check_cmake_options,
         check_workflow_refs,
         check_zsh_syntax,
