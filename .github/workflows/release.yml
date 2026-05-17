@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   release:
-    name: Create Draft Release
+    name: Publish Release
     runs-on: ubuntu-24.04
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     steps:
@@ -26,19 +26,30 @@ jobs:
       - name: Load Version Info
         id: run_data
         run: |
+          set -euo pipefail
           cat version-info.json
           {
             echo "nad_version=$(jq -r .nad_version version-info.json)"
             echo "upstream_version=$(jq -r .upstream_version version-info.json)"
+            echo "force_rebuild=$(jq -r .force_rebuild version-info.json)"
+            echo "should_publish=$(jq -r .should_publish version-info.json)"
+            echo "release_branch=$(jq -r .release_branch version-info.json)"
             echo "commit_sha=$(jq -r .commit_sha version-info.json)"
           } >> "${GITHUB_OUTPUT}"
 
+      - name: Skip existing release
+        if: steps.run_data.outputs.should_publish != 'true'
+        run: |
+          echo "No release publication requested for ${{ steps.run_data.outputs.nad_version }}."
+
       - name: Checkout code
+        if: steps.run_data.outputs.should_publish == 'true'
         uses: actions/checkout@v4
         with:
           ref: ${{ steps.run_data.outputs.commit_sha }}
 
       - name: Download all artifacts
+        if: steps.run_data.outputs.should_publish == 'true'
         uses: actions/download-artifact@v4
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -46,6 +57,7 @@ jobs:
           path: artifacts/
 
       - name: Get Upstream Release Info
+        if: steps.run_data.outputs.should_publish == 'true'
         id: upstream_release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -64,19 +76,24 @@ jobs:
           if [[ -n "${release_json}" ]]; then
             is_prerelease=$(jq -r .prerelease <<< "${release_json}")
           else
-            echo "Upstream tag not found, assuming not a prerelease"
+            echo "Upstream tag not found, assuming not a prerelease."
             is_prerelease=false
           fi
 
           echo "is_prerelease=${is_prerelease}" >> "${GITHUB_OUTPUT}"
 
       - name: Generate Release Body and Checksums
+        if: steps.run_data.outputs.should_publish == 'true'
         run: |
-          UPSTREAM_VERSION="${{ steps.run_data.outputs.upstream_version }}"
+          set -euo pipefail
+          upstream_version="${{ steps.run_data.outputs.upstream_version }}"
+          commit_sha="${{ steps.run_data.outputs.commit_sha }}"
 
           {
             echo "See upstream release notes for the changelog:"
-            echo "https://github.com/obsproject/obs-studio/releases/tag/${UPSTREAM_VERSION}"
+            echo "https://github.com/obsproject/obs-studio/releases/tag/${upstream_version}"
+            echo ""
+            echo "NAD source commit: ${commit_sha}"
             echo ""
             echo "**Note: This is an unsigned build.**"
             echo ""
@@ -86,28 +103,46 @@ jobs:
             echo '```'
           } > CHECKSUMS.txt
 
-          find artifacts -type f \( -name "*.dmg" -o -name "*.zip" \) -exec sha256sum {} + >> CHECKSUMS.txt
+          find artifacts -type f -name "*.dmg" -exec sha256sum {} + >> CHECKSUMS.txt
           echo '```' >> CHECKSUMS.txt
 
       - name: Create and Push Tag
+        if: steps.run_data.outputs.should_publish == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NAD_VERSION: ${{ steps.run_data.outputs.nad_version }}
+          FORCE_REBUILD: ${{ steps.run_data.outputs.force_rebuild }}
+          COMMIT_SHA: ${{ steps.run_data.outputs.commit_sha }}
         run: |
           set -euo pipefail
-          NAD_VERSION="${{ steps.run_data.outputs.nad_version }}"
           git config user.name "NAD Sync Bot"
           git config user.email "noreply@github.com"
 
+          release_exists=false
+          tag_exists=false
           if gh release view "${NAD_VERSION}" >/dev/null 2>&1; then
+            release_exists=true
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/${NAD_VERSION}" >/dev/null 2>&1; then
+            tag_exists=true
+          fi
+
+          if [[ "${FORCE_REBUILD}" != "true" && ( "${release_exists}" == "true" || "${tag_exists}" == "true" ) ]]; then
+            echo "::error::${NAD_VERSION} already exists. Re-run Sync and Build with force_rebuild=true to replace it."
+            exit 1
+          fi
+
+          if [[ "${release_exists}" == "true" ]]; then
             gh release delete "${NAD_VERSION}" --yes --cleanup-tag
-          elif git ls-remote --exit-code --tags origin "refs/tags/${NAD_VERSION}" >/dev/null 2>&1; then
+          elif [[ "${tag_exists}" == "true" ]]; then
             git push --delete origin "${NAD_VERSION}"
           fi
 
-          git tag -f -a "${NAD_VERSION}" -m "Release ${NAD_VERSION}" "${{ steps.run_data.outputs.commit_sha }}"
+          git tag -f -a "${NAD_VERSION}" -m "Release ${NAD_VERSION}" "${COMMIT_SHA}"
           git push --force origin "${NAD_VERSION}"
 
       - name: Publish Release
+        if: steps.run_data.outputs.should_publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.run_data.outputs.nad_version }}

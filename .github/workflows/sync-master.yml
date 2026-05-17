@@ -1,18 +1,49 @@
 name: Sync Upstream Master
 
 on:
+  schedule:
+    - cron: '20 1 * * *'
   workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: 'Upstream ref to merge from obsproject/obs-studio'
+        required: false
+        type: string
+        default: master
+      auto_merge:
+        description: 'Fast-forward the verified sync branch into master'
+        required: false
+        type: boolean
+        default: true
+      run_macos_build:
+        description: 'Run macOS no-AJA/no-DeckLink build before auto-merge'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
 
+concurrency:
+  group: nad-upstream-master-sync
+  cancel-in-progress: false
+
 jobs:
   sync:
-    name: Sync with upstream master
+    name: Prepare upstream master sync
     runs-on: ubuntu-24.04
+    outputs:
+      synced: ${{ steps.sync.outputs.synced }}
+      sync_branch: ${{ steps.sync.outputs.sync_branch }}
+      commit_sha: ${{ steps.sync.outputs.commit_sha }}
+      auto_merge: ${{ steps.sync.outputs.auto_merge }}
+      run_macos_build: ${{ steps.sync.outputs.run_macos_build }}
     env:
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'master' }}
       UPSTREAM_REPO: https://github.com/obsproject/obs-studio.git
+      REQUESTED_UPSTREAM_REF: ${{ github.event.inputs.upstream_ref }}
+      REQUESTED_AUTO_MERGE: ${{ github.event.inputs.auto_merge }}
+      REQUESTED_RUN_MACOS_BUILD: ${{ github.event.inputs.run_macos_build }}
       PUSH_TOKEN: ${{ secrets.NAD_AUTOMATION_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout Repository
@@ -23,202 +54,187 @@ jobs:
 
       - name: Configure Git
         run: |
+          set -euo pipefail
           git config user.name "NAD Sync Bot"
           git config user.email "noreply@github.com"
-          git remote set-url origin "https://x-access-token:${{ env.PUSH_TOKEN }}@github.com/${{ github.repository }}.git"
+          git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${{ github.repository }}.git"
 
-      - name: Merge Upstream Master
+      - name: Create verified sync branch
+        id: sync
         run: |
           set -euo pipefail
 
+          upstream_ref="${REQUESTED_UPSTREAM_REF:-master}"
+          auto_merge="${REQUESTED_AUTO_MERGE:-true}"
+          run_macos_build="${REQUESTED_RUN_MACOS_BUILD:-true}"
+          sync_branch="nad/auto-upstream-master"
+
+          {
+            echo "sync_branch=${sync_branch}"
+            echo "auto_merge=${auto_merge}"
+            echo "run_macos_build=${run_macos_build}"
+          } >> "${GITHUB_OUTPUT}"
+
           if git remote get-url upstream >/dev/null 2>&1; then
-            git remote set-url upstream ${{ env.UPSTREAM_REPO }}
+            git remote set-url upstream "${UPSTREAM_REPO}"
           else
-            git remote add upstream ${{ env.UPSTREAM_REPO }}
+            git remote add upstream "${UPSTREAM_REPO}"
           fi
 
-          git fetch upstream --prune master
-          git fetch origin --prune ${{ env.DEFAULT_BRANCH }}
+          git fetch upstream --prune "refs/heads/${upstream_ref}:refs/remotes/upstream/${upstream_ref}"
+          git fetch origin --prune "refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
 
-          git checkout "${{ env.DEFAULT_BRANCH }}"
-          git reset --hard "origin/${{ env.DEFAULT_BRANCH }}"
+          git switch -C "${sync_branch}" "origin/${DEFAULT_BRANCH}"
 
-          echo "Merging upstream/master with protected files..."
+          upstream_commit="$(git rev-parse "upstream/${upstream_ref}^{commit}")"
+          if git merge-base --is-ancestor "${upstream_commit}" HEAD; then
+            echo "origin/${DEFAULT_BRANCH} already contains upstream/${upstream_ref}."
+            echo "synced=false" >> "${GITHUB_OUTPUT}"
+            echo "commit_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
 
-          # Configure merge strategy to prefer our version for specific files
           git config merge.ours.driver true
-
-          # Create temporary merge attributes in .git/info/attributes
-          cat > .git/info/attributes << EOF
-          .github/workflows/ merge=ours
+          cat > .git/info/attributes <<'EOF'
+          .github/workflows/** merge=ours
           build-aux/steam/scripts_macos/launch.sh merge=ours
           EOF
 
-          # Check if build-aux/com.obsproject.Studio.json exists before merge
-          FLATPAK_MANIFEST="build-aux/com.obsproject.Studio.json"
-          MANIFEST_CHECK_NEEDED=false
-          CURRENT_MANIFEST_HASH=""
+          git merge --no-ff --no-edit "upstream/${upstream_ref}"
 
-          if [[ -f "$FLATPAK_MANIFEST" ]]; then
-            MANIFEST_CHECK_NEEDED=true
-            CURRENT_MANIFEST_HASH=$(git hash-object "$FLATPAK_MANIFEST")
-            echo "Detected $FLATPAK_MANIFEST, current hash: $CURRENT_MANIFEST_HASH"
-            echo "Will check for changes after merge..."
+          python3 .github/scripts/nad-ci-guard.py apply
+          python3 .github/scripts/nad-ci-guard.py validate
+          git diff --check
+
+          git add -A -- CMakePresets.json build-aux/com.obsproject.Studio.json cmake/macos/resources/package.applescript .github
+          if ! git diff --cached --quiet; then
+            git commit -m "ci: apply NAD invariants after upstream master sync"
           fi
 
-          # Check if CMakePresets.json exists before merge
-          CMAKE_PRESETS="CMakePresets.json"
-          PRESETS_CHECK_NEEDED=false
-          CURRENT_PRESETS_HASH=""
+          python3 .github/scripts/nad-ci-guard.py validate
+          git diff --check
 
-          if [[ -f "$CMAKE_PRESETS" ]]; then
-            PRESETS_CHECK_NEEDED=true
-            CURRENT_PRESETS_HASH=$(git hash-object "$CMAKE_PRESETS")
-            echo "Detected $CMAKE_PRESETS, current hash: $CURRENT_PRESETS_HASH"
-            echo "Will check for changes after merge..."
-          fi
+          git push --force-with-lease origin "${sync_branch}"
+          echo "synced=true" >> "${GITHUB_OUTPUT}"
+          echo "commit_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
 
-          # Check if package.applescript exists before merge
-          PACKAGE_SCRIPT="cmake/macos/resources/package.applescript"
-          SCRIPT_CHECK_NEEDED=false
-          CURRENT_SCRIPT_HASH=""
+  build:
+    name: Build macOS sync candidate
+    needs: sync
+    if: needs.sync.outputs.synced == 'true' && needs.sync.outputs.run_macos_build == 'true'
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.1.app/Contents/Developer
+      MACOSX_DEPLOYMENT_TARGET: 13.0
+      CMAKE_OSX_DEPLOYMENT_TARGET: 13.0
+      OBS_COMPILE_DEPRECATION_AS_WARNING: ON
+      CMAKE_EXTRA_FLAGS: -DENABLE_AJA=OFF -DENABLE_DECKLINK=OFF
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [arm64, x86_64]
+    defaults:
+      run:
+        shell: zsh --no-rcs --errexit --pipefail {0}
+    steps:
+      - name: Checkout sync candidate
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.sync.outputs.commit_sha }}
+          submodules: recursive
+          fetch-depth: 0
 
-          if [[ -f "$PACKAGE_SCRIPT" ]]; then
-            SCRIPT_CHECK_NEEDED=true
-            CURRENT_SCRIPT_HASH=$(git hash-object "$PACKAGE_SCRIPT")
-            echo "Detected $PACKAGE_SCRIPT, current hash: $CURRENT_SCRIPT_HASH"
-            echo "Will check for changes after merge..."
-          fi
-
-          # Define scripts to check and capture their current hashes before merge
-          declare -A SCRIPT_HASHES_CURRENT
-          SYNC_SCRIPTS=(
-            "version-sync.py"
-            ".build.zsh"
-            ".package.zsh"
-            "Build-Windows.ps1"
-            "Package-Windows.ps1"
-          )
-
-          SCRIPTS_DIR=".github/scripts"
-          GITHUB_SCRIPTS_CHECK_NEEDED=false
-
-          # Capture current hashes for all scripts before merge
-          for script in "${SYNC_SCRIPTS[@]}"; do
-            script_path="$SCRIPTS_DIR/$script"
-            if [[ -f "$script_path" ]]; then
-              GITHUB_SCRIPTS_CHECK_NEEDED=true
-              SCRIPT_HASHES_CURRENT["$script"]=$(git hash-object "$script_path")
-              echo "Detected $script_path, current hash: ${SCRIPT_HASHES_CURRENT[$script]}"
-            fi
-          done
-
-          if [[ "$GITHUB_SCRIPTS_CHECK_NEEDED" == "true" ]]; then
-            echo "Will check for changes after merge..."
-          fi
-
-          # Execute merge
-          git merge --no-ff --no-edit "upstream/master" || {
-            echo "Merge conflict detected, resolving with protected files..."
-            git checkout --ours .github/workflows/ 2>/dev/null || true
-            git checkout --ours build-aux/steam/scripts_macos/launch.sh 2>/dev/null || true
-            git add .
-            git commit --no-edit || true
-          }
-
-          # Check if manifest file was modified
-          if [[ "$MANIFEST_CHECK_NEEDED" == "true" ]]; then
-            NEW_MANIFEST_HASH=$(git hash-object "$FLATPAK_MANIFEST")
-            if [[ "$CURRENT_MANIFEST_HASH" != "$NEW_MANIFEST_HASH" ]]; then
-              echo "❗ WARNING: $FLATPAK_MANIFEST has been modified by upstream"
-              echo "Current hash: $CURRENT_MANIFEST_HASH"
-              echo "New hash: $NEW_MANIFEST_HASH"
-              echo ""
-              echo "The following customizations may need review:"
-              echo "  - AJA support configuration (-DENABLE_AJA)"
-              echo "  - DeckLink support configuration (-DENABLE_DECKLINK)"
-              echo "  - System permissions and security settings"
-              echo ""
-              echo "Please review the changes manually before proceeding."
-              exit 1
-            else
-              echo "✓ $FLATPAK_MANIFEST unchanged, continuing..."
-            fi
-          fi
-
-          # Check if package.applescript was modified
-          if [[ "$SCRIPT_CHECK_NEEDED" == "true" ]]; then
-            NEW_SCRIPT_HASH=$(git hash-object "$PACKAGE_SCRIPT")
-            if [[ "$CURRENT_SCRIPT_HASH" != "$NEW_SCRIPT_HASH" ]]; then
-              echo "❗ WARNING: $PACKAGE_SCRIPT has been modified by upstream"
-              echo "Current hash: $CURRENT_SCRIPT_HASH"
-              echo "New hash: $NEW_SCRIPT_HASH"
-              echo ""
-              echo "Please verify the following NAD customizations are preserved:"
-              echo "  - APP_NAME_PLACEHOLDER variable (not hardcoded 'OBS.app')"
-              echo ""
-              echo "Please review the changes manually before proceeding."
-              exit 1
-            else
-              echo "✓ $PACKAGE_SCRIPT unchanged, continuing..."
-            fi
-          fi
-
-          # Check if .github/scripts/ files were modified
-          if [[ "$GITHUB_SCRIPTS_CHECK_NEEDED" == "true" ]]; then
-            SCRIPT_MODIFIED=false
-            for script in "${SYNC_SCRIPTS[@]}"; do
-              script_path="$SCRIPTS_DIR/$script"
-              if [[ -f "$script_path" ]]; then
-                NEW_HASH=$(git hash-object "$script_path")
-                CURRENT_HASH_VALUE="${SCRIPT_HASHES_CURRENT[$script]}"
-                if [[ "$CURRENT_HASH_VALUE" != "$NEW_HASH" ]]; then
-                  echo "❗ WARNING: $script_path has been modified by upstream"
-                  echo "Current hash: $CURRENT_HASH_VALUE"
-                  echo "New hash: $NEW_HASH"
-                  SCRIPT_MODIFIED=true
-                fi
-              fi
-            done
-
-            if [[ "$SCRIPT_MODIFIED" == "true" ]]; then
-              echo ""
-              echo "The following NAD-specific scripts may need review:"
-              echo "  - version-sync.py: NAD version management tool"
-              echo "  - Build scripts: NAD custom build configurations"
-              echo "  - Package scripts: NAD packaging customizations"
-              echo ""
-              echo "Please review all script changes manually before proceeding."
-              exit 1
-            else
-              echo "✓ All .github/scripts/ files unchanged, continuing..."
-            fi
-          fi
-
-          # Check if CMakePresets.json was modified
-          if [[ "$PRESETS_CHECK_NEEDED" == "true" ]]; then
-            NEW_PRESETS_HASH=$(git hash-object "$CMAKE_PRESETS")
-            if [[ "$CURRENT_PRESETS_HASH" != "$NEW_PRESETS_HASH" ]]; then
-              echo "❗ WARNING: $CMAKE_PRESETS has been modified by upstream"
-              echo "Current hash: $CURRENT_PRESETS_HASH"
-              echo "New hash: $NEW_PRESETS_HASH"
-              echo ""
-              echo "Please verify the following NAD customizations are preserved:"
-              echo "  - ENABLE_AJA disabled (set to OFF)"
-              echo "  - ENABLE_DECKLINK disabled (set to OFF)"
-              echo "  - macOS CI remains on the Xcode compilation cache preset"
-              echo ""
-              exit 1
-            else
-              echo "✓ $CMAKE_PRESETS unchanged, continuing..."
-            fi
-          fi
-
-      - name: Push Changes
+      - name: Set Up Environment
+        id: setup
         run: |
-          if git diff --quiet HEAD "origin/${{ env.DEFAULT_BRANCH }}"; then
-            echo "No changes to push."
-          else
-            echo "Pushing changes to origin/${{ env.DEFAULT_BRANCH }}..."
-            git push origin "${{ env.DEFAULT_BRANCH }}"
-          fi
+          print '::group::Enable Xcode 26.1'
+          sudo xcode-select --switch /Applications/Xcode_26.1.app/Contents/Developer
+          print '::endgroup::'
+
+          local -A arch_names=(x86_64 intel arm64 apple)
+          print "cpuName=${arch_names[${{ matrix.target }}]}" >> $GITHUB_OUTPUT
+
+          local xcode_cas_path="${HOME}/Library/Developer/Xcode/DerivedData/CompilationCache.noindex"
+          if ! [[ -d ${xcode_cas_path} ]] mkdir -p ${xcode_cas_path}
+          print "xcodeCasPath=${xcode_cas_path}" >> $GITHUB_OUTPUT
+
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: xcode-cache
+        with:
+          path: ${{ steps.setup.outputs.xcodeCasPath }}
+          key: ${{ runner.os }}-xcode-${{ matrix.target }}-master-RelWithDebInfo
+          restore-keys: |
+            ${{ runner.os }}-xcode-${{ matrix.target }}-
+
+      - name: Clean build artifacts
+        run: |
+          rm -rf build_macos
+          find . -name CMakeCache.txt -delete
+
+      - name: Build OBS
+        env:
+          XCODE_CAS_PATH: ${{ steps.setup.outputs.xcodeCasPath }}
+        run: |
+          export OBS_VERSION_OVERRIDE="master-no-aja-$(git rev-parse --short=12 HEAD)"
+          export CMAKE_EXTRA_FLAGS="-DENABLE_AJA=OFF -DENABLE_DECKLINK=OFF"
+          export CODESIGN_IDENT='-'
+
+          .github/scripts/build-macos \
+            --target macos-${{ matrix.target }} \
+            --config RelWithDebInfo
+
+      - name: Package OBS
+        run: |
+          export CODESIGN_IDENT='-'
+          .github/scripts/package-macos \
+            --target macos-${{ matrix.target }} \
+            --config RelWithDebInfo \
+            --package
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: obs-studio-macos-${{ matrix.target }}-master-no-aja
+          path: build_macos/*.dmg
+
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: github.event_name != 'pull_request' && steps.xcode-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ steps.setup.outputs.xcodeCasPath }}
+          key: ${{ runner.os }}-xcode-${{ matrix.target }}-master-RelWithDebInfo
+
+  merge:
+    name: Fast-forward verified sync
+    needs: [sync, build]
+    if: |
+      always() &&
+      needs.sync.outputs.synced == 'true' &&
+      needs.sync.outputs.auto_merge == 'true' &&
+      (needs.sync.outputs.run_macos_build != 'true' || needs.build.result == 'success')
+    runs-on: ubuntu-24.04
+    env:
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'master' }}
+      PUSH_TOKEN: ${{ secrets.NAD_AUTOMATION_TOKEN || secrets.GITHUB_TOKEN }}
+      SYNC_BRANCH: ${{ needs.sync.outputs.sync_branch }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ env.PUSH_TOKEN }}
+
+      - name: Fast-forward master
+        run: |
+          set -euo pipefail
+          git config user.name "NAD Sync Bot"
+          git config user.email "noreply@github.com"
+          git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${{ github.repository }}.git"
+
+          git fetch origin --prune \
+            "refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}" \
+            "refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}"
+          git switch -C "${DEFAULT_BRANCH}" "origin/${DEFAULT_BRANCH}"
+          git reset --hard "origin/${DEFAULT_BRANCH}"
+          git merge --ff-only "origin/${SYNC_BRANCH}"
+          git push origin "${DEFAULT_BRANCH}"
+          git push origin --delete "${SYNC_BRANCH}" || true
