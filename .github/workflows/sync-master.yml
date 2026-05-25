@@ -175,7 +175,6 @@ jobs:
         env:
           XCODE_CAS_PATH: ${{ steps.setup.outputs.xcodeCasPath }}
         run: |
-          export OBS_VERSION_OVERRIDE="master-no-aja-$(git rev-parse --short=12 HEAD)"
           export CMAKE_EXTRA_FLAGS="-DENABLE_AJA=OFF -DENABLE_DECKLINK=OFF"
           export CODESIGN_IDENT='-'
 
