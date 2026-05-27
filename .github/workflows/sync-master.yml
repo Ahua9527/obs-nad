@@ -95,12 +95,41 @@ jobs:
           fi
 
           git config merge.ours.driver true
-          cat > .git/info/attributes <<'EOF'
-          .github/workflows/** merge=ours
+          attributes_path="$(git rev-parse --git-path info/attributes)"
+          mkdir -p "$(dirname "${attributes_path}")"
+          cat > "${attributes_path}" <<'EOF'
+          .github/** merge=ours
           build-aux/steam/scripts_macos/launch.sh merge=ours
           EOF
 
-          git merge --no-ff --no-edit "upstream/${upstream_ref}"
+          if ! git merge --no-ff --no-edit "upstream/${upstream_ref}"; then
+            conflict_files="$(git diff --name-only --diff-filter=U)"
+            if [[ -z "${conflict_files}" ]]; then
+              echo "Merge failed without unmerged paths." >&2
+              exit 1
+            fi
+
+            non_github_conflicts="$(printf '%s\n' "${conflict_files}" | grep -v '^\.github/' || true)"
+            if [[ -n "${non_github_conflicts}" ]]; then
+              printf 'Non-.github merge conflicts remain:\n%s\n' "${non_github_conflicts}" >&2
+              exit 1
+            fi
+
+            while IFS= read -r conflict_file; do
+              [[ -n "${conflict_file}" ]] || continue
+              if git cat-file -e "HEAD:${conflict_file}" 2>/dev/null; then
+                git checkout HEAD -- "${conflict_file}"
+                git add -- "${conflict_file}"
+              else
+                git rm -f --ignore-unmatch -- "${conflict_file}"
+              fi
+            done <<< "${conflict_files}"
+
+            rm -rf .github
+            git checkout HEAD -- .github
+            git add -A -- .github
+            git commit --no-edit
+          fi
 
           python3 .github/scripts/nad-ci-guard.py apply
           python3 .github/scripts/nad-ci-guard.py validate
