@@ -168,10 +168,10 @@ jobs:
 
   macos-build:
     name: macOS
-    runs-on: macos-15
+    runs-on: macos-26
     needs: check-event
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.1.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
       MACOSX_DEPLOYMENT_TARGET: 13.0
       CMAKE_OSX_DEPLOYMENT_TARGET: 13.0
       OBS_COMPILE_DEPRECATION_AS_WARNING: ON
@@ -195,8 +195,8 @@ jobs:
           : Set Up Environment
           if (( ${+RUNNER_DEBUG} )) setopt XTRACE
 
-          print '::group::Enable Xcode 26.1'
-          sudo xcode-select --switch /Applications/Xcode_26.1.app/Contents/Developer
+          print '::group::Enable Xcode 26.5'
+          sudo xcode-select --switch /Applications/Xcode_26.5.app/Contents/Developer
           print '::endgroup::'
 
           print '::group::Clean Homebrew Environment'

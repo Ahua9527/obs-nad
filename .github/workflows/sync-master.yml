@@ -122,9 +122,9 @@ jobs:
     name: Build macOS sync candidate
     needs: sync
     if: needs.sync.outputs.synced == 'true' && needs.sync.outputs.run_macos_build == 'true'
-    runs-on: macos-15
+    runs-on: macos-26
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.1.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
       MACOSX_DEPLOYMENT_TARGET: 13.0
       CMAKE_OSX_DEPLOYMENT_TARGET: 13.0
       OBS_COMPILE_DEPRECATION_AS_WARNING: ON
@@ -147,8 +147,8 @@ jobs:
       - name: Set Up Environment
         id: setup
         run: |
-          print '::group::Enable Xcode 26.1'
-          sudo xcode-select --switch /Applications/Xcode_26.1.app/Contents/Developer
+          print '::group::Enable Xcode 26.5'
+          sudo xcode-select --switch /Applications/Xcode_26.5.app/Contents/Developer
           print '::endgroup::'
 
           local -A arch_names=(x86_64 intel arm64 apple)
