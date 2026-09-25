@@ -1,0 +1,239 @@
+name: Sync Upstream Master
+
+on:
+  schedule:
+    - cron: '20 1 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: 'Upstream ref to merge from obsproject/obs-studio'
+        required: false
+        type: string
+        default: master
+      auto_merge:
+        description: 'Fast-forward the verified sync branch into master'
+        required: false
+        type: boolean
+        default: true
+      run_macos_build:
+        description: 'Run macOS no-AJA/no-DeckLink build before auto-merge'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nad-upstream-master-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Prepare upstream master sync
+    runs-on: ubuntu-24.04
+    outputs:
+      synced: ${{ steps.sync.outputs.synced }}
+      sync_branch: ${{ steps.sync.outputs.sync_branch }}
+      commit_sha: ${{ steps.sync.outputs.commit_sha }}
+      auto_merge: ${{ steps.sync.outputs.auto_merge }}
+      run_macos_build: ${{ steps.sync.outputs.run_macos_build }}
+    env:
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'master' }}
+      UPSTREAM_REPO: https://github.com/obsproject/obs-studio.git
+      REQUESTED_UPSTREAM_REF: ${{ github.event.inputs.upstream_ref }}
+      REQUESTED_AUTO_MERGE: ${{ github.event.inputs.auto_merge }}
+      REQUESTED_RUN_MACOS_BUILD: ${{ github.event.inputs.run_macos_build }}
+      PUSH_TOKEN: ${{ secrets.NAD_AUTOMATION_TOKEN || secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ env.PUSH_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          set -euo pipefail
+          git config user.name "NAD Sync Bot"
+          git config user.email "noreply@github.com"
+          git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${{ github.repository }}.git"
+
+      - name: Create verified sync branch
+        id: sync
+        run: |
+          set -euo pipefail
+
+          upstream_ref="${REQUESTED_UPSTREAM_REF:-master}"
+          auto_merge="${REQUESTED_AUTO_MERGE:-true}"
+          run_macos_build="${REQUESTED_RUN_MACOS_BUILD:-true}"
+          sync_branch="nad/auto-upstream-master"
+
+          {
+            echo "sync_branch=${sync_branch}"
+            echo "auto_merge=${auto_merge}"
+            echo "run_macos_build=${run_macos_build}"
+          } >> "${GITHUB_OUTPUT}"
+
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream "${UPSTREAM_REPO}"
+          else
+            git remote add upstream "${UPSTREAM_REPO}"
+          fi
+
+          git fetch upstream --prune "refs/heads/${upstream_ref}:refs/remotes/upstream/${upstream_ref}"
+          git fetch origin --prune "refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+
+          git switch -C "${sync_branch}" "origin/${DEFAULT_BRANCH}"
+
+          upstream_commit="$(git rev-parse "upstream/${upstream_ref}^{commit}")"
+          if git merge-base --is-ancestor "${upstream_commit}" HEAD; then
+            echo "origin/${DEFAULT_BRANCH} already contains upstream/${upstream_ref}."
+            echo "synced=false" >> "${GITHUB_OUTPUT}"
+            echo "commit_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          git config merge.ours.driver true
+          cat > .git/info/attributes <<'EOF'
+          .github/workflows/** merge=ours
+          build-aux/steam/scripts_macos/launch.sh merge=ours
+          EOF
+
+          git merge --no-ff --no-edit "upstream/${upstream_ref}"
+
+          python3 .github/scripts/nad-ci-guard.py apply
+          python3 .github/scripts/nad-ci-guard.py validate
+          git diff --check
+
+          git add -A -- CMakePresets.json build-aux/com.obsproject.Studio.json cmake/macos/resources/package.applescript plugins/mac-virtualcam/CMakeLists.txt .github
+          if ! git diff --cached --quiet; then
+            git commit -m "ci: apply NAD invariants after upstream master sync"
+          fi
+
+          python3 .github/scripts/nad-ci-guard.py validate
+          git diff --check
+
+          git push --force-with-lease origin "${sync_branch}"
+          echo "synced=true" >> "${GITHUB_OUTPUT}"
+          echo "commit_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+  build:
+    name: Build macOS sync candidate
+    needs: sync
+    if: needs.sync.outputs.synced == 'true' && needs.sync.outputs.run_macos_build == 'true'
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.1.app/Contents/Developer
+      MACOSX_DEPLOYMENT_TARGET: 13.0
+      CMAKE_OSX_DEPLOYMENT_TARGET: 13.0
+      OBS_COMPILE_DEPRECATION_AS_WARNING: ON
+      CMAKE_EXTRA_FLAGS: -DENABLE_AJA=OFF -DENABLE_DECKLINK=OFF
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [arm64, x86_64]
+    defaults:
+      run:
+        shell: zsh --no-rcs --errexit --pipefail {0}
+    steps:
+      - name: Checkout sync candidate
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.sync.outputs.commit_sha }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set Up Environment
+        id: setup
+        run: |
+          print '::group::Enable Xcode 26.1'
+          sudo xcode-select --switch /Applications/Xcode_26.1.app/Contents/Developer
+          print '::endgroup::'
+
+          local -A arch_names=(x86_64 intel arm64 apple)
+          print "cpuName=${arch_names[${{ matrix.target }}]}" >> $GITHUB_OUTPUT
+
+          local xcode_cas_path="${HOME}/Library/Developer/Xcode/DerivedData/CompilationCache.noindex"
+          if ! [[ -d ${xcode_cas_path} ]] mkdir -p ${xcode_cas_path}
+          print "xcodeCasPath=${xcode_cas_path}" >> $GITHUB_OUTPUT
+
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: xcode-cache
+        with:
+          path: ${{ steps.setup.outputs.xcodeCasPath }}
+          key: ${{ runner.os }}-xcode-${{ matrix.target }}-master-RelWithDebInfo
+          restore-keys: |
+            ${{ runner.os }}-xcode-${{ matrix.target }}-
+
+      - name: Clean build artifacts
+        run: |
+          rm -rf build_macos
+          find . -name CMakeCache.txt -delete
+
+      - name: Build OBS
+        env:
+          XCODE_CAS_PATH: ${{ steps.setup.outputs.xcodeCasPath }}
+        run: |
+          export CMAKE_EXTRA_FLAGS="-DENABLE_AJA=OFF -DENABLE_DECKLINK=OFF"
+          export CODESIGN_IDENT='-'
+
+          .github/scripts/build-macos \
+            --target macos-${{ matrix.target }} \
+            --config RelWithDebInfo
+
+      - name: Package OBS
+        run: |
+          export CODESIGN_IDENT='-'
+          .github/scripts/package-macos \
+            --target macos-${{ matrix.target }} \
+            --config RelWithDebInfo \
+            --package
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: obs-studio-macos-${{ matrix.target }}-master-no-aja
+          path: build_macos/*.dmg
+
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: github.event_name != 'pull_request' && steps.xcode-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ steps.setup.outputs.xcodeCasPath }}
+          key: ${{ runner.os }}-xcode-${{ matrix.target }}-master-RelWithDebInfo
+
+  merge:
+    name: Fast-forward verified sync
+    needs: [sync, build]
+    if: |
+      always() &&
+      needs.sync.outputs.synced == 'true' &&
+      needs.sync.outputs.auto_merge == 'true' &&
+      (needs.sync.outputs.run_macos_build != 'true' || needs.build.result == 'success')
+    runs-on: ubuntu-24.04
+    env:
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'master' }}
+      PUSH_TOKEN: ${{ secrets.NAD_AUTOMATION_TOKEN || secrets.GITHUB_TOKEN }}
+      SYNC_BRANCH: ${{ needs.sync.outputs.sync_branch }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ env.PUSH_TOKEN }}
+
+      - name: Fast-forward master
+        run: |
+          set -euo pipefail
+          git config user.name "NAD Sync Bot"
+          git config user.email "noreply@github.com"
+          git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${{ github.repository }}.git"
+
+          git fetch origin --prune \
+            "refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}" \
+            "refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}"
+          git switch -C "${DEFAULT_BRANCH}" "origin/${DEFAULT_BRANCH}"
+          git reset --hard "origin/${DEFAULT_BRANCH}"
+          git merge --ff-only "origin/${SYNC_BRANCH}"
+          git push origin "${DEFAULT_BRANCH}"
+          git push origin --delete "${SYNC_BRANCH}" || true

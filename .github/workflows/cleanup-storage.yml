@@ -1,0 +1,73 @@
+# Purpose: daily storage hygiene — deletes stale workflow artifacts (and, in repos
+# with a linked GHCR image, stale container versions) to keep the account-level
+# Packages/Artifacts storage quota under control.
+# Run: automatically on schedule; also via Actions -> Cleanup Storage -> Run.
+# Requirements: none beyond the repo's built-in GITHUB_TOKEN.
+name: Cleanup Storage
+
+on:
+  schedule:
+    - cron: "17 21 * * *" # daily 21:17 UTC = 05:17 Beijing time
+  workflow_dispatch:
+
+permissions:
+  actions: write # delete workflow artifacts
+  packages: write # list/delete container versions linked to this repo
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Delete artifacts older than 14 days
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cutoff=$(date -u -d '14 days ago' +%s)
+          echo "cutoff timestamp: $cutoff"
+          ids=$(gh api --paginate "repos/$REPO/actions/artifacts?per_page=100" \
+            --jq '.artifacts[]
+                  | select(.expired | not)
+                  | select((.created_at | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) < '"$cutoff"')
+                  | .id')
+          total=$(printf '%s' "$ids" | grep -c . || true)
+          echo "artifacts to delete: $total"
+          for id in $ids; do
+            gh api -X DELETE "repos/$REPO/actions/artifacts/$id" \
+              && echo "deleted artifact $id" \
+              || echo "::warning::failed to delete artifact $id"
+          done
+
+      - name: Delete stale container versions older than 30 days
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          PACKAGE: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          pkg_lower=$(echo "$PACKAGE" | tr '[:upper:]' '[:lower:]')
+          if ! gh api "users/$OWNER/packages/container/$pkg_lower" >/dev/null 2>&1; then
+            echo "no container package '$pkg_lower' linked to this account; skipping"
+            exit 0
+          fi
+          cutoff=$(date -u -d '30 days ago' +%s)
+          echo "cutoff timestamp: $cutoff"
+          ids=$(gh api --paginate \
+            "users/$OWNER/packages/container/$pkg_lower/versions?per_page=100" \
+            --jq '.[]
+                  | (.metadata.container.tags // []) as $tags
+                  | select([$tags[] | select(test("^(latest|main|v[0-9])"))] | length == 0)
+                  | select((.created_at | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) < '"$cutoff"')
+                  | .id')
+          total=$(printf '%s' "$ids" | grep -c . || true)
+          echo "package versions to delete: $total"
+          for id in $ids; do
+            gh api -X DELETE \
+              "users/$OWNER/packages/container/$pkg_lower/versions/$id" \
+              && echo "deleted package version $id" \
+              || echo "::warning::failed to delete version $id"
+          done

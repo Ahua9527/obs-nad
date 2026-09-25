@@ -1,0 +1,266 @@
+name: Sync and Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_version:
+        description: 'Stable upstream version tag to sync and build (e.g. 32.1.2)'
+        required: true
+        type: string
+      force_rebuild:
+        description: 'Rebuild and republish even when the NAD release already exists'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nad-release-${{ github.event.inputs.upstream_version }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Prepare release branch
+    runs-on: ubuntu-24.04
+    outputs:
+      nad_version: ${{ steps.release_info.outputs.nad_version }}
+      upstream_version: ${{ steps.release_info.outputs.upstream_version }}
+      force_rebuild: ${{ steps.release_info.outputs.force_rebuild }}
+      should_build: ${{ steps.prepare.outputs.should_build }}
+      should_publish: ${{ steps.prepare.outputs.should_publish }}
+      release_branch: ${{ steps.prepare.outputs.release_branch }}
+      commit_sha: ${{ steps.prepare.outputs.commit_sha }}
+    env:
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'master' }}
+      UPSTREAM_REPO: https://github.com/obsproject/obs-studio.git
+      PUSH_TOKEN: ${{ secrets.NAD_AUTOMATION_TOKEN || secrets.GITHUB_TOKEN }}
+      REQUESTED_FORCE_REBUILD: ${{ github.event.inputs.force_rebuild }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ env.PUSH_TOKEN }}
+
+      - name: Resolve Release Info
+        id: release_info
+        run: |
+          set -euo pipefail
+          upstream_version="${{ github.event.inputs.upstream_version }}"
+          nad_version="${upstream_version}-no-aja"
+          force_rebuild="${REQUESTED_FORCE_REBUILD:-false}"
+
+          {
+            echo "upstream_version=${upstream_version}"
+            echo "nad_version=${nad_version}"
+            echo "force_rebuild=${force_rebuild}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Configure Git
+        run: |
+          set -euo pipefail
+          git config user.name "NAD Sync Bot"
+          git config user.email "noreply@github.com"
+          git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${{ github.repository }}.git"
+
+      - name: Prepare NAD release branch
+        id: prepare
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NAD_VERSION: ${{ steps.release_info.outputs.nad_version }}
+          UPSTREAM_VERSION: ${{ steps.release_info.outputs.upstream_version }}
+          FORCE_REBUILD: ${{ steps.release_info.outputs.force_rebuild }}
+        run: |
+          set -euo pipefail
+
+          release_branch="nad/release/${UPSTREAM_VERSION}"
+          {
+            echo "release_branch=${release_branch}"
+            echo "should_build=false"
+            echo "should_publish=false"
+          } >> "${GITHUB_OUTPUT}"
+
+          release_exists=false
+          tag_exists=false
+          if gh release view "${NAD_VERSION}" >/dev/null 2>&1; then
+            release_exists=true
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/${NAD_VERSION}" >/dev/null 2>&1; then
+            tag_exists=true
+          fi
+
+          if [[ "${FORCE_REBUILD}" != "true" && ( "${release_exists}" == "true" || "${tag_exists}" == "true" ) ]]; then
+            echo "Release or tag ${NAD_VERSION} already exists; skipping build."
+            echo "commit_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream "${UPSTREAM_REPO}"
+          else
+            git remote add upstream "${UPSTREAM_REPO}"
+          fi
+
+          git fetch upstream --tags --prune
+          git fetch origin --prune "refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+
+          tag_ref=""
+          for candidate in "refs/tags/${UPSTREAM_VERSION}" "refs/tags/v${UPSTREAM_VERSION}"; do
+            if git rev-parse --verify --quiet "${candidate}^{commit}" >/dev/null; then
+              tag_ref="${candidate}"
+              break
+            fi
+          done
+
+          if [[ -z "${tag_ref}" ]]; then
+            echo "::error::Upstream tag ${UPSTREAM_VERSION} was not found."
+            exit 1
+          fi
+
+          git switch -C "${release_branch}" "${tag_ref}^{commit}"
+
+          rm -rf .github/actions .github/scripts .github/workflows
+          overlay_paths=(
+            ".github/actions"
+            ".github/scripts"
+            ".github/workflows"
+          )
+          for path in "${overlay_paths[@]}"; do
+            if git cat-file -e "origin/${DEFAULT_BRANCH}:${path}" 2>/dev/null; then
+              git checkout "origin/${DEFAULT_BRANCH}" -- "${path}"
+            fi
+          done
+
+          python3 .github/scripts/nad-ci-guard.py apply
+          python3 .github/scripts/nad-ci-guard.py validate
+          git diff --check
+
+          git add -A -- .github CMakePresets.json build-aux/com.obsproject.Studio.json cmake/macos/resources/package.applescript plugins/mac-virtualcam/CMakeLists.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "ci: prepare NAD release ${UPSTREAM_VERSION}"
+          fi
+
+          python3 .github/scripts/nad-ci-guard.py validate
+          git diff --check
+          git push --force-with-lease origin "${release_branch}"
+
+          {
+            echo "should_build=true"
+            echo "should_publish=true"
+            echo "commit_sha=$(git rev-parse HEAD)"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Save Version Info
+        run: |
+          jq -n \
+            --arg nad_version "${{ steps.release_info.outputs.nad_version }}" \
+            --arg upstream_version "${{ steps.release_info.outputs.upstream_version }}" \
+            --arg force_rebuild "${{ steps.release_info.outputs.force_rebuild }}" \
+            --arg should_publish "${{ steps.prepare.outputs.should_publish }}" \
+            --arg release_branch "${{ steps.prepare.outputs.release_branch }}" \
+            --arg commit_sha "${{ steps.prepare.outputs.commit_sha }}" \
+            '{
+              nad_version: $nad_version,
+              upstream_version: $upstream_version,
+              force_rebuild: $force_rebuild,
+              should_publish: $should_publish,
+              release_branch: $release_branch,
+              commit_sha: $commit_sha
+            }' > version-info.json
+
+      - name: Upload Version Info
+        uses: actions/upload-artifact@v4
+        with:
+          name: version-info
+          path: version-info.json
+
+  build:
+    name: Build macOS
+    needs: sync
+    if: needs.sync.outputs.should_build == 'true'
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.1.app/Contents/Developer
+      MACOSX_DEPLOYMENT_TARGET: 13.0
+      CMAKE_OSX_DEPLOYMENT_TARGET: 13.0
+      OBS_COMPILE_DEPRECATION_AS_WARNING: ON
+      CMAKE_EXTRA_FLAGS: -DENABLE_AJA=OFF -DENABLE_DECKLINK=OFF -DOBS_COMPILE_DEPRECATION_AS_WARNING=ON
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [arm64, x86_64]
+        build_type: [no-aja]
+    defaults:
+      run:
+        shell: zsh --no-rcs --errexit --pipefail {0}
+
+    steps:
+      - name: Checkout release branch
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.sync.outputs.commit_sha }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set Up Environment
+        id: setup
+        run: |
+          print '::group::Enable Xcode 26.1'
+          sudo xcode-select --switch /Applications/Xcode_26.1.app/Contents/Developer
+          print '::endgroup::'
+
+          local -A arch_names=(x86_64 intel arm64 apple)
+          print "cpuName=${arch_names[${{ matrix.target }}]}" >> $GITHUB_OUTPUT
+
+          local xcode_cas_path="${HOME}/Library/Developer/Xcode/DerivedData/CompilationCache.noindex"
+          if ! [[ -d ${xcode_cas_path} ]] mkdir -p ${xcode_cas_path}
+          print "xcodeCasPath=${xcode_cas_path}" >> $GITHUB_OUTPUT
+
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: xcode-cache
+        with:
+          path: ${{ steps.setup.outputs.xcodeCasPath }}
+          key: ${{ runner.os }}-xcode-${{ matrix.target }}-${{ needs.sync.outputs.upstream_version }}-RelWithDebInfo
+          restore-keys: |
+            ${{ runner.os }}-xcode-${{ matrix.target }}-
+
+      - name: Clean build artifacts
+        run: |
+          rm -rf build_macos
+          find . -name CMakeCache.txt -delete
+
+      - name: Build OBS
+        env:
+          UPSTREAM_VERSION: ${{ needs.sync.outputs.upstream_version }}
+          BUILD_TYPE: ${{ matrix.build_type }}
+          XCODE_CAS_PATH: ${{ steps.setup.outputs.xcodeCasPath }}
+        run: |
+          export OBS_VERSION_OVERRIDE="${UPSTREAM_VERSION}-${BUILD_TYPE}"
+          export CMAKE_EXTRA_FLAGS="-DENABLE_AJA=OFF -DENABLE_DECKLINK=OFF -DOBS_COMPILE_DEPRECATION_AS_WARNING=ON"
+          export CODESIGN_IDENT='-'
+
+          .github/scripts/build-macos \
+            --target macos-${{ matrix.target }} \
+            --config RelWithDebInfo
+
+      - name: Package OBS
+        run: |
+          export CODESIGN_IDENT='-'
+          .github/scripts/package-macos \
+            --target macos-${{ matrix.target }} \
+            --config RelWithDebInfo \
+            --package
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: obs-studio-macos-${{ matrix.target }}-${{ matrix.build_type }}
+          path: build_macos/*.dmg
+
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: github.event_name != 'pull_request' && steps.xcode-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ steps.setup.outputs.xcodeCasPath }}
+          key: ${{ runner.os }}-xcode-${{ matrix.target }}-${{ needs.sync.outputs.upstream_version }}-RelWithDebInfo

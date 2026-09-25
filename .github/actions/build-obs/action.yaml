@@ -28,6 +28,10 @@ inputs:
     description: Working directory for packaging
     required: false
     default: ${{ github.workspace }}
+  version:
+    description: OBS version override
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
@@ -39,6 +43,7 @@ runs:
         CODESIGN_IDENT: ${{ inputs.codesignIdent }}
         CODESIGN_TEAM: ${{ inputs.codesignTeam }}
         PROVISIONING_PROFILE: ${{ inputs.provisioningProfileUUID }}
+        OBS_VERSION_OVERRIDE: ${{ inputs.version }}
       run: |
         : Run macOS Build
 
@@ -53,15 +58,14 @@ runs:
         git fetch origin --no-tags --no-recurse-submodules -q
         .github/scripts/build-macos ${build_args}
 
-    - name: Install Dependencies 🛍️
+    - name: Install Dependencies
       if: runner.os == 'Linux'
       shell: bash
       run: |
-        : Install Dependencies 🛍️
+        : Install Dependencies
         echo ::group::Install Dependencies
         eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
         echo "/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin" >> $GITHUB_PATH
-        brew update
         brew install --quiet zsh
         echo ::endgroup::
 
@@ -69,6 +73,8 @@ runs:
       if: runner.os == 'Linux'
       shell: zsh --no-rcs --errexit --pipefail {0}
       working-directory: ${{ inputs.workingDirectory }}
+      env:
+        OBS_VERSION_OVERRIDE: ${{ inputs.version }}
       run: |
         : Run Ubuntu Build
 
@@ -85,6 +91,8 @@ runs:
       if: runner.os == 'Windows'
       shell: pwsh
       working-directory: ${{ inputs.workingDirectory }}
+      env:
+        OBS_VERSION_OVERRIDE: ${{ inputs.version }}
       run: |
         # Run Windows Build
         $BuildArgs = @{
@@ -103,7 +111,7 @@ runs:
       if: runner.os == 'Linux'
       shell: zsh --no-rcs --errexit --pipefail {0}
       run: |
-        : Create Summary 📊
+        : Create Summary
 
         local -a ccache_data
         if (( ${+RUNNER_DEBUG} )) {

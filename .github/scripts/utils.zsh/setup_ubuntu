@@ -32,7 +32,7 @@ IFS=';' read -r deps_version deps_baseurl deps_label deps_hash deps_revision <<<
   ' ${project_root}/CMakePresets.json)"
 
 if (( ! deps_version )) {
-  log_error 'No valid cef spec found in buildspec.json.'
+  log_error 'No valid cef spec found in CMakePresets.json.'
   return 2
 }
 log_group 'Setting up pre-built Chromium Embedded Framework...'
